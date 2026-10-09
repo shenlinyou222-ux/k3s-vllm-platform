@@ -1,0 +1,115 @@
+﻿---
+# ══════════════════════════════════════════════════════════════
+#  k8s/jenkins-agent.yaml —— Jenkins Agent（真正干活的地方）
+#
+#  ⭐ 三个关键设计（每个都有原因）：
+#
+#   ① 挂宿主 docker.sock
+#      为什么：我们的镜像是 FROM 一个 30.7GB 的基础镜像。
+#              用宿主 docker → 命中层缓存 → 构建 0.5 秒
+#              用 Kaniko（集群内构建）→ 必须重拉 30.7GB → 几小时 ❌
+#      代价：Pod 能控制宿主 docker（安全面变大，本地环境可接受）
+#
+#   ② 用 hostPath 挂仓库，且【挂到相同路径】
+#      为什么：k3s 就跑在 WSL 里，节点的 /mnt/e 就是 Windows 的 E 盘。
+#              我们的脚本全用绝对路径 /srv/k3s-vllm-platform/...，
+#              所以必须挂到【同一个路径】，否则路径全失效。
+#
+#   ③ 用 ServiceAccount 而不是挂 kubeconfig
+#      为什么：/etc/rancher/k3s/k3s.yaml 里的 server 是 https://127.0.0.1:6443
+#              —— 在 Pod 里 127.0.0.1 是 Pod 自己，不通。
+#              k8s 会自动注入 KUBERNETES_SERVICE_HOST + SA token，
+#              kubectl 直接用 in-cluster config 即可 ✅
+#
+#  ⚠️ 需要人工做的一步：JENKINS_SECRET
+#       Agent 的 secret 要在 Jenkins UI 里创建节点后才能拿到（见 README）
+# ══════════════════════════════════════════════════════════════
+
+# ── ① ServiceAccount + RBAC ──
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: jenkins-agent
+  namespace: cicd
+
+---
+# 本地单节点集群，给 cluster-admin 最简单（生产环境要收窄）
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: jenkins-agent-admin
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+- kind: ServiceAccount
+  name: jenkins-agent
+  namespace: cicd
+
+---
+# ── ② Agent Deployment ──
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jenkins-agent
+  namespace: cicd
+  labels: {app: jenkins-agent}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: jenkins-agent}
+  template:
+    metadata:
+      labels: {app: jenkins-agent}
+    spec:
+      serviceAccountName: jenkins-agent
+
+      # ⭐ 需要 root：docker.sock 是 srw-rw---- root:docker
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 0
+
+      containers:
+      - name: agent
+        image: dsh/jenkins-agent:1.0
+        imagePullPolicy: IfNotPresent
+        env:
+        # Jenkins Controller 的集群内地址
+        - {name: JENKINS_URL, value: "http://jenkins.cicd.svc.cluster.local:8080"}
+        - {name: JENKINS_AGENT_NAME, value: "wsl-docker"}
+        - {name: JENKINS_AGENT_WORKDIR, value: "/home/jenkins/agent"}
+        - {name: TZ, value: "Asia/Shanghai"}
+        # ⚠️ 从 Jenkins UI 拿到后填进来（或改用 Secret）
+        - {name: JENKINS_SECRET, value: "REPLACE_ME_FROM_JENKINS_UI"}
+        volumeMounts:
+        # ① 宿主 docker（构建用）
+        - {name: docker-sock, mountPath: /var/run/docker.sock}
+        # ② 仓库（⭐ 挂到相同路径，否则脚本里的绝对路径全失效）
+        - {name: repo, mountPath: /srv/k3s-vllm-platform}
+        # Agent 工作目录（持久化，避免每次重下依赖）
+        - {name: agent-work, mountPath: /home/jenkins/agent}
+        resources:
+          requests: {cpu: "200m", memory: "512Mi"}
+          limits:   {cpu: "4",    memory: "4Gi"}
+
+      volumes:
+      - name: docker-sock
+        hostPath: {path: /var/run/docker.sock, type: Socket}
+      - name: repo
+        hostPath: {path: /srv/k3s-vllm-platform, type: Directory}
+      - name: agent-work
+        persistentVolumeClaim: {claimName: jenkins-agent-work}
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: jenkins-agent-work
+  namespace: cicd
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 5Gi

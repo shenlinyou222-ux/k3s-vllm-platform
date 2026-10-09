@@ -1,0 +1,21 @@
+﻿---
+# ══════════════════════════════════════════════════════════════
+#  k8s/jenkins-namespace.yaml
+#
+#  ⚠️ 为什么单独一个文件：
+#    `kubectl apply --dry-run=server` 是逐个对象对着【当前集群】校验的。
+#    如果 Namespace 和它里面的对象在同一个文件，dry-run 会报
+#    `namespaces "cicd" not found` —— 因为校验那些对象时 cicd 还不存在。
+#
+#    真 apply 没问题（kubectl 按顺序创建），但为了能预检，拆开更干净。
+#
+#  用法： kubectl apply -f k8s/jenkins-namespace.yaml   # 先
+#         kubectl apply -f k8s/jenkins.yaml             # 后
+# ══════════════════════════════════════════════════════════════
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cicd
+  labels:
+    app.kubernetes.io/part-of: k3s-vllm-platform
+    role: cicd

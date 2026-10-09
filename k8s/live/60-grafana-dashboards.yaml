@@ -1,0 +1,969 @@
+# ══════════════════════════════════════════════════════════════
+#  60-grafana-dashboards.yaml —— Grafana 仪表盘（三个）
+#
+#  2026-10-08 从集群里【导出并纳管】。理由同 50-prometheus-config.yaml：
+#  这份 CM 是 12 天前用一次性脚本建到集群里的，仓库里没有 → 漂移无人知。
+#
+#  包含三个 key（Grafana 的 file provider 每个 key 当一个仪表盘文件）：
+#    gpu.json         GPU 硬件监控（nvidia-smi exporter）
+#    llamacpp.json    llama.cpp CPU 对照（目标服务已下线）
+#    vllm.json        ⭐ 生成式 LLM（vllm-march7）
+#    embed.json       ⭐ 新增：向量服务（vllm-embed / dmeta-small）
+#
+#  ⚠️ 本次做的两处修改：
+#    ① 新增 embed.json —— 原来没有向量服务的仪表盘。而且不能直接复用
+#       vllm.json：它的查询没有 service 标签过滤，集群里现在有两个 vLLM
+#       服务（march7 平均 336ms / embed 平均 26ms），混在一起算分位数
+#       两边都不对。新仪表盘所有查询都带 service="embed"。
+#    ② 修 vllm.json 里一个失效指标名：vLLM 0.30 给 TPOT 加了 request_ 前缀
+#       （time_per_output_token_seconds → request_time_per_output_token_seconds），
+#       旧名字查不到数据 → TPOT 面板一直是空的。
+#
+#  ⚠️ 改了这份 CM 之后 Grafana 会自己重载（provider 的
+#     updateIntervalSeconds: 10），但要等 kubelet 把新 CM 同步到挂载卷
+#     （默认 ~60s）。不用重启 Grafana。
+#
+#  访问：http://<WSL-IP>:30030   （用户 admin；密码见 Grafana Deployment 的
+#     GF_SECURITY_ADMIN_PASSWORD。匿名 Viewer 也开着）
+#
+#  ⚠️ 公开版脱敏说明：本仓库【不含】Grafana / Prometheus 的 Deployment 清单 ——
+#     那两个是当年用一次性脚本建到集群里的，从来没进过仓库（这正是本目录
+#     README 里记的「CM 不在仓库 → 漂移无人知」那个坑）。所以这里也拿不出它的 env。
+#     要复刻请自己写 Deployment，并★必须★把 GF_SECURITY_ADMIN_PASSWORD
+#     走 valueFrom + Secret 注入，不要写明文。
+#    向量服务： /d/vllm-embed-mon
+# ══════════════════════════════════════════════════════════════
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboard-vllm
+  namespace: monitoring
+  labels: {app: grafana}
+data:
+  gpu.json: |
+    {
+      "title": "GPU 监控 (nvidia-smi / RTX 5060)",
+      "uid": "gpu-mon",
+      "tags": ["gpu", "nvidia", "wsl"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "version": 1,
+      "editable": true,
+      "refresh": "5s",
+      "time": { "from": "now-15m", "to": "now" },
+      "annotations": { "list": [] },
+      "templating": { "list": [] },
+      "panels": [
+        {
+          "id": 1,
+          "type": "timeseries",
+          "title": "GPU 计算利用率 %",
+          "datasource": { "type": "prometheus", "uid": "prom" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+          "fieldConfig": { "defaults": { "unit": "percent", "min": 0, "max": 100, "custom": { "drawStyle": "line", "fillOpacity": 25 } }, "overrides": [] },
+          "targets": [
+            { "refId": "A", "legendFormat": "{{name}}", "expr": "nvidia_smi_utilization_gpu_percent" }
+          ]
+        },
+        {
+          "id": 2,
+          "type": "timeseries",
+          "title": "显存占用 MiB（used / total）",
+          "datasource": { "type": "prometheus", "uid": "prom" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+          "fieldConfig": { "defaults": { "unit": "decmbytes", "custom": { "drawStyle": "line", "fillOpacity": 20 } }, "overrides": [] },
+          "targets": [
+            { "refId": "A", "legendFormat": "已用", "expr": "nvidia_smi_memory_used_mib" },
+            { "refId": "B", "legendFormat": "总量", "expr": "nvidia_smi_memory_total_mib" },
+            { "refId": "C", "legendFormat": "空闲", "expr": "nvidia_smi_memory_free_mib" }
+          ]
+        },
+        {
+          "id": 3,
+          "type": "timeseries",
+          "title": "显存带宽利用率 % / SM 时钟 MHz",
+          "datasource": { "type": "prometheus", "uid": "prom" },
+          "gridPos": { "h": 8, "w": 8, "x": 0, "y": 8 },
+          "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
+          "targets": [
+            { "refId": "A", "legendFormat": "显存带宽 %", "expr": "nvidia_smi_utilization_memory_percent" },
+            { "refId": "B", "legendFormat": "SM 时钟 MHz", "expr": "nvidia_smi_clock_sm_mhz" }
+          ]
+        },
+        {
+          "id": 4,
+          "type": "timeseries",
+          "title": "温度 °C",
+          "datasource": { "type": "prometheus", "uid": "prom" },
+          "gridPos": { "h": 8, "w": 8, "x": 8, "y": 8 },
+          "fieldConfig": { "defaults": { "unit": "celsius", "custom": { "drawStyle": "line", "fillOpacity": 20 } }, "overrides": [] },
+          "targets": [
+            { "refId": "A", "legendFormat": "温度", "expr": "nvidia_smi_temperature_celsius" }
+          ]
+        },
+        {
+          "id": 5,
+          "type": "timeseries",
+          "title": "功耗 W（对照上限）",
+          "datasource": { "type": "prometheus", "uid": "prom" },
+          "gridPos": { "h": 8, "w": 8, "x": 16, "y": 8 },
+          "fieldConfig": { "defaults": { "unit": "watt", "custom": { "drawStyle": "line", "fillOpacity": 20 } }, "overrides": [] },
+          "targets": [
+            { "refId": "A", "legendFormat": "当前功耗", "expr": "nvidia_smi_power_draw_watts" },
+            { "refId": "B", "legendFormat": "功耗上限", "expr": "nvidia_smi_power_limit_watts" }
+          ]
+        },
+        {
+          "id": 6,
+          "type": "timeseries",
+          "title": "关联分析：GPU 利用率 %  vs  vLLM 并发请求数  vs  显存已用",
+          "description": "看负载如何驱动 GPU。注：WSL2 不支持按进程统计显存，故不展示进程维度。",
+          "datasource": { "type": "prometheus", "uid": "prom" },
+          "gridPos": { "h": 8, "w": 24, "x": 0, "y": 16 },
+          "fieldConfig": {
+            "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 10 } },
+            "overrides": [
+              {
+                "matcher": { "id": "byName", "options": "vLLM 并发请求" },
+                "properties": [ { "id": "custom.axisPlacement", "value": "right" } ]
+              }
+            ]
+          },
+          "targets": [
+            { "refId": "A", "legendFormat": "GPU 利用率 %", "expr": "nvidia_smi_utilization_gpu_percent" },
+            { "refId": "B", "legendFormat": "显存已用 MiB", "expr": "nvidia_smi_memory_used_mib" },
+            { "refId": "C", "legendFormat": "vLLM 并发请求", "expr": "vllm:num_requests_running" }
+          ]
+        }
+      ]
+    }
+  llamacpp.json: |
+    {
+      "title": "llama.cpp CPU 推理对照",
+      "uid": "llamacpp-mon",
+      "tags": ["llamacpp", "cpu", "inference"],
+      "timezone": "browser",
+      "schemaVersion": 39,
+      "version": 1,
+      "editable": true,
+      "refresh": "5s",
+      "time": { "from": "now-15m", "to": "now" },
+      "annotations": { "list": [] },
+      "templating": { "list": [] },
+      "panels": [
+        {
+          "id": 1,
+          "type": "timeseries",
+          "title": "生成速度 (token/s) —— 对照 vLLM GPU",
+          "datasource": { "type": "prometheus", "uid": "prom" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+          "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 20 } }, "overrides": [] },
+          "targets": [
+            { "refId": "A", "legendFormat": "输入 prompt tok/s", "expr": "llamacpp:prompt_tokens_seconds" },
+            { "refId": "B", "legendFormat": "输出 predicted tok/s", "expr": "llamacpp:predicted_tokens_seconds" }
+          ]
+        },
+        {
+          "id": 2,
+          "type": "timeseries",
+          "title": "槽位占用：处理中 / 排队（--parallel 1 单槽位）",
+          "datasource": { "type": "prometheus", "uid": "prom" },
+          "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+          "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 20 } }, "overrides": [] },
+          "targets": [
+            { "refId": "A", "legendFormat": "processing 处理中", "expr": "llamacpp:requests_processing" },
+            { "refId": "B", "legendFormat": "deferred 排队中", "expr": "llamacpp:requests_deferred" },
+            { "refId": "C", "legendFormat": "busy slots/解码", "expr": "llamacpp:n_busy_slots_per_decode" }
+          ]
+        },
+        {
+          "id": 3,
+          "type": "timeseries",
+          "title": "累计 token",
+          "datasource": { "type": "prometheus", "uid": "prom" },
+          "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+          "fieldConfig": { "defaults": { "unit": "short", "custom": { "drawStyle": "line", "fillOpacity": 10 } }, "overrides": [] },
+          "targets": [
+            { "refId": "A", "legendFormat": "prompt_total", "expr": "llamacpp:prompt_tokens_total" },
+            { "refId": "B", "legendFormat": "predicted_total", "expr": "llamacpp:tokens_predicted_total" },
+            { "refId": "C", "legendFormat": "prompt_cached(复用)", "expr": "llamacpp:prompt_tokens_cached_total" }
+          ]
+        },
+        {
+          "id": 4,
+          "type": "stat",
+          "title": "累计解码次数",
+          "datasource": { "type": "prometheus", "uid": "prom" },
+          "gridPos": { "h": 8, "w": 6, "x": 12, "y": 8 },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "targets": [
+            { "refId": "A", "legendFormat": "n_decode_total", "expr": "llamacpp:n_decode_total" }
+          ]
+        },
+        {
+          "id": 5,
+          "type": "stat",
+          "title": "历史最大上下文 token",
+          "datasource": { "type": "prometheus", "uid": "prom" },
+          "gridPos": { "h": 8, "w": 6, "x": 18, "y": 8 },
+          "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+          "targets": [
+            { "refId": "A", "legendFormat": "n_tokens_max", "expr": "llamacpp:n_tokens_max" }
+          ]
+        }
+      ]
+    }
+  vllm.json: |
+    {
+     "title": "vLLM 推理服务监控 (本地 GPU)",
+     "uid": "vllm-mon",
+     "tags": [
+      "vllm",
+      "llm",
+      "inference"
+     ],
+     "timezone": "browser",
+     "schemaVersion": 39,
+     "version": 1,
+     "editable": true,
+     "refresh": "5s",
+     "time": {
+      "from": "now-15m",
+      "to": "now"
+     },
+     "annotations": {
+      "list": []
+     },
+     "templating": {
+      "list": []
+     },
+     "panels": [
+      {
+       "id": 1,
+       "type": "timeseries",
+       "title": "TTFT 首 token 延迟 (p50 / p90 / p99)",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+       },
+       "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+       },
+       "fieldConfig": {
+        "defaults": {
+         "unit": "s",
+         "custom": {
+          "drawStyle": "line",
+          "fillOpacity": 10
+         }
+        },
+        "overrides": []
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "legendFormat": "p50",
+         "expr": "histogram_quantile(0.50, sum(rate(vllm:time_to_first_token_seconds_bucket[1m])) by (le))"
+        },
+        {
+         "refId": "B",
+         "legendFormat": "p90",
+         "expr": "histogram_quantile(0.90, sum(rate(vllm:time_to_first_token_seconds_bucket[1m])) by (le))"
+        },
+        {
+         "refId": "C",
+         "legendFormat": "p99",
+         "expr": "histogram_quantile(0.99, sum(rate(vllm:time_to_first_token_seconds_bucket[1m])) by (le))"
+        }
+       ]
+      },
+      {
+       "id": 2,
+       "type": "timeseries",
+       "title": "TPOT 每 token 生成延迟 (p50 / p99)",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+       },
+       "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+       },
+       "fieldConfig": {
+        "defaults": {
+         "unit": "s",
+         "custom": {
+          "drawStyle": "line",
+          "fillOpacity": 10
+         }
+        },
+        "overrides": []
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "legendFormat": "p50",
+         "expr": "histogram_quantile(0.50, sum(rate(vllm:request_time_per_output_token_seconds_bucket[1m])) by (le))"
+        },
+        {
+         "refId": "B",
+         "legendFormat": "p99",
+         "expr": "histogram_quantile(0.99, sum(rate(vllm:request_time_per_output_token_seconds_bucket[1m])) by (le))"
+        }
+       ]
+      },
+      {
+       "id": 3,
+       "type": "timeseries",
+       "title": "并发请求：正在算 / 排队等",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+       },
+       "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 8
+       },
+       "fieldConfig": {
+        "defaults": {
+         "unit": "short",
+         "custom": {
+          "drawStyle": "line",
+          "fillOpacity": 20
+         }
+        },
+        "overrides": []
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "legendFormat": "running 正在推理",
+         "expr": "vllm:num_requests_running"
+        },
+        {
+         "refId": "B",
+         "legendFormat": "waiting 排队中",
+         "expr": "vllm:num_requests_waiting"
+        }
+       ]
+      },
+      {
+       "id": 4,
+       "type": "timeseries",
+       "title": "KV cache 使用率（GPU 显存的真瓶颈）",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+       },
+       "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 8
+       },
+       "fieldConfig": {
+        "defaults": {
+         "unit": "percent",
+         "custom": {
+          "drawStyle": "line",
+          "fillOpacity": 20
+         }
+        },
+        "overrides": []
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "legendFormat": "kv_cache_usage %",
+         "expr": "vllm:kv_cache_usage_perc * 100"
+        }
+       ]
+      },
+      {
+       "id": 5,
+       "type": "timeseries",
+       "title": "Token 吞吐 (tok/s)",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+       },
+       "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 8
+       },
+       "fieldConfig": {
+        "defaults": {
+         "unit": "short",
+         "custom": {
+          "drawStyle": "line",
+          "fillOpacity": 20
+         }
+        },
+        "overrides": []
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "legendFormat": "输入 prompt",
+         "expr": "rate(vllm:prompt_tokens_total[1m])"
+        },
+        {
+         "refId": "B",
+         "legendFormat": "输出 generation",
+         "expr": "rate(vllm:generation_tokens_total[1m])"
+        }
+       ]
+      },
+      {
+       "id": 6,
+       "type": "timeseries",
+       "title": "输出结束原因（stop=正常 / length=被 max_tokens 截断）",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+       },
+       "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 16
+       },
+       "fieldConfig": {
+        "defaults": {
+         "unit": "short",
+         "custom": {
+          "drawStyle": "bars",
+          "fillOpacity": 40,
+          "stacking": {
+           "mode": "normal"
+          }
+         }
+        },
+        "overrides": []
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "legendFormat": "{{finished_reason}}",
+         "expr": "sum by (finished_reason) (increase(vllm:request_success_total[5m]))"
+        }
+       ]
+      },
+      {
+       "id": 7,
+       "type": "timeseries",
+       "title": "前缀缓存命中率（省算力的关键）",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+       },
+       "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 16
+       },
+       "fieldConfig": {
+        "defaults": {
+         "unit": "percent",
+         "min": 0,
+         "max": 100,
+         "custom": {
+          "drawStyle": "line",
+          "fillOpacity": 20
+         }
+        },
+        "overrides": []
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "legendFormat": "命中率",
+         "expr": "100 * sum(rate(vllm:prefix_cache_hits_total[1m])) / clamp_min(sum(rate(vllm:prefix_cache_queries_total[1m])), 0.001)"
+        }
+       ]
+      },
+      {
+       "id": 8,
+       "type": "stat",
+       "title": "累计完成请求",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+       },
+       "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 16
+       },
+       "fieldConfig": {
+        "defaults": {
+         "unit": "short"
+        },
+        "overrides": []
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "legendFormat": "总请求",
+         "expr": "sum(vllm:request_success_total)"
+        }
+       ]
+      }
+     ]
+    }
+  embed.json: |
+    {
+     "title": "vLLM 向量服务监控 (vllm-embed / dmeta-small)",
+     "uid": "vllm-embed-mon",
+     "tags": [
+      "vllm",
+      "embedding",
+      "embed",
+      "inference"
+     ],
+     "timezone": "browser",
+     "schemaVersion": 39,
+     "version": 1,
+     "editable": true,
+     "refresh": "5s",
+     "time": {
+      "from": "now-15m",
+      "to": "now"
+     },
+     "annotations": {
+      "list": []
+     },
+     "templating": {
+      "list": []
+     },
+     "panels": [
+      {
+       "id": 1,
+       "type": "stat",
+       "title": "可用性 up",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+       },
+       "gridPos": {
+        "h": 6,
+        "w": 4,
+        "x": 0,
+        "y": 0
+       },
+       "fieldConfig": {
+        "defaults": {
+         "unit": "none",
+         "thresholds": {
+          "mode": "absolute",
+          "steps": [
+           {
+            "color": "red",
+            "value": null
+           },
+           {
+            "color": "green",
+            "value": 1
+           }
+          ]
+         }
+        },
+        "overrides": []
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "legendFormat": "可用性 up",
+         "expr": "up{job=\"vllm\",service=\"embed\"}"
+        }
+       ],
+       "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+         "calcs": [
+          "lastNotNull"
+         ],
+         "fields": "",
+         "values": false
+        }
+       }
+      },
+      {
+       "id": 2,
+       "type": "stat",
+       "title": "累计成功请求",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+       },
+       "gridPos": {
+        "h": 6,
+        "w": 5,
+        "x": 4,
+        "y": 0
+       },
+       "fieldConfig": {
+        "defaults": {
+         "unit": "short",
+         "thresholds": {
+          "mode": "absolute",
+          "steps": [
+           {
+            "color": "green",
+            "value": null
+           }
+          ]
+         }
+        },
+        "overrides": []
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "legendFormat": "累计成功请求",
+         "expr": "sum(vllm:request_success_total{service=\"embed\"})"
+        }
+       ],
+       "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+         "calcs": [
+          "lastNotNull"
+         ],
+         "fields": "",
+         "values": false
+        }
+       }
+      },
+      {
+       "id": 3,
+       "type": "stat",
+       "title": "近 2 分钟 QPS",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+       },
+       "gridPos": {
+        "h": 6,
+        "w": 5,
+        "x": 9,
+        "y": 0
+       },
+       "fieldConfig": {
+        "defaults": {
+         "unit": "reqps",
+         "thresholds": {
+          "mode": "absolute",
+          "steps": [
+           {
+            "color": "green",
+            "value": null
+           }
+          ]
+         }
+        },
+        "overrides": []
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "legendFormat": "近 2 分钟 QPS",
+         "expr": "sum(rate(vllm:request_success_total{service=\"embed\"}[2m]))"
+        }
+       ],
+       "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+         "calcs": [
+          "lastNotNull"
+         ],
+         "fields": "",
+         "values": false
+        }
+       }
+      },
+      {
+       "id": 4,
+       "type": "stat",
+       "title": "正在处理 / 排队",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+       },
+       "gridPos": {
+        "h": 6,
+        "w": 5,
+        "x": 14,
+        "y": 0
+       },
+       "fieldConfig": {
+        "defaults": {
+         "unit": "short",
+         "thresholds": {
+          "mode": "absolute",
+          "steps": [
+           {
+            "color": "green",
+            "value": null
+           }
+          ]
+         }
+        },
+        "overrides": []
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "legendFormat": "正在处理 / 排队",
+         "expr": "sum(vllm:num_requests_running{service=\"embed\"})"
+        }
+       ],
+       "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+         "calcs": [
+          "lastNotNull"
+         ],
+         "fields": "",
+         "values": false
+        }
+       }
+      },
+      {
+       "id": 5,
+       "type": "stat",
+       "title": "平均端到端延迟",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+       },
+       "gridPos": {
+        "h": 6,
+        "w": 5,
+        "x": 19,
+        "y": 0
+       },
+       "fieldConfig": {
+        "defaults": {
+         "unit": "ms",
+         "thresholds": {
+          "mode": "absolute",
+          "steps": [
+           {
+            "color": "green",
+            "value": null
+           }
+          ]
+         }
+        },
+        "overrides": []
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "legendFormat": "平均端到端延迟",
+         "expr": "sum(rate(vllm:e2e_request_latency_seconds_sum{service=\"embed\"}[2m])) / clamp_min(sum(rate(vllm:e2e_request_latency_seconds_count{service=\"embed\"}[2m])), 0.001) * 1000"
+        }
+       ],
+       "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+         "calcs": [
+          "lastNotNull"
+         ],
+         "fields": "",
+         "values": false
+        }
+       }
+      },
+      {
+       "id": 10,
+       "type": "timeseries",
+       "title": "★ 响应延迟分位数 p50 / p90 / p99（TTFT 直方图，毫秒级桶）",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+       },
+       "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 6
+       },
+       "fieldConfig": {
+        "defaults": {
+         "unit": "ms",
+         "custom": {
+          "drawStyle": "line",
+          "fillOpacity": 10
+         }
+        },
+        "overrides": []
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "legendFormat": "p50",
+         "expr": "histogram_quantile(0.50, sum(rate(vllm:time_to_first_token_seconds_bucket{service=\"embed\"}[1m])) by (le)) * 1000"
+        },
+        {
+         "refId": "B",
+         "legendFormat": "p90",
+         "expr": "histogram_quantile(0.90, sum(rate(vllm:time_to_first_token_seconds_bucket{service=\"embed\"}[1m])) by (le)) * 1000"
+        },
+        {
+         "refId": "C",
+         "legendFormat": "p99",
+         "expr": "histogram_quantile(0.99, sum(rate(vllm:time_to_first_token_seconds_bucket{service=\"embed\"}[1m])) by (le)) * 1000"
+        }
+       ]
+      },
+      {
+       "id": 11,
+       "type": "timeseries",
+       "title": "平均延迟拆解（端到端 / 推理 / 排队）",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+       },
+       "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 6
+       },
+       "fieldConfig": {
+        "defaults": {
+         "unit": "ms",
+         "custom": {
+          "drawStyle": "line",
+          "fillOpacity": 10
+         }
+        },
+        "overrides": []
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "legendFormat": "端到端",
+         "expr": "sum(rate(vllm:e2e_request_latency_seconds_sum{service=\"embed\"}[1m])) / clamp_min(sum(rate(vllm:e2e_request_latency_seconds_count{service=\"embed\"}[1m])), 0.001) * 1000"
+        },
+        {
+         "refId": "B",
+         "legendFormat": "推理",
+         "expr": "sum(rate(vllm:request_inference_time_seconds_sum{service=\"embed\"}[1m])) / clamp_min(sum(rate(vllm:request_inference_time_seconds_count{service=\"embed\"}[1m])), 0.001) * 1000"
+        },
+        {
+         "refId": "C",
+         "legendFormat": "排队",
+         "expr": "sum(rate(vllm:request_queue_time_seconds_sum{service=\"embed\"}[1m])) / clamp_min(sum(rate(vllm:request_queue_time_seconds_count{service=\"embed\"}[1m])), 0.001) * 1000"
+        }
+       ]
+      },
+      {
+       "id": 12,
+       "type": "timeseries",
+       "title": "吞吐：QPS / prompt token 速率",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+       },
+       "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 15
+       },
+       "fieldConfig": {
+        "defaults": {
+         "unit": "short",
+         "custom": {
+          "drawStyle": "line",
+          "fillOpacity": 10
+         }
+        },
+        "overrides": []
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "legendFormat": "QPS",
+         "expr": "sum(rate(vllm:request_success_total{service=\"embed\"}[1m]))"
+        },
+        {
+         "refId": "B",
+         "legendFormat": "prompt tok/s",
+         "expr": "sum(rate(vllm:request_prompt_tokens_sum{service=\"embed\"}[1m]))"
+        }
+       ]
+      },
+      {
+       "id": 13,
+       "type": "timeseries",
+       "title": "并发：正在算 / 排队等",
+       "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+       },
+       "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 15
+       },
+       "fieldConfig": {
+        "defaults": {
+         "unit": "short",
+         "custom": {
+          "drawStyle": "line",
+          "fillOpacity": 10
+         }
+        },
+        "overrides": []
+       },
+       "targets": [
+        {
+         "refId": "A",
+         "legendFormat": "正在算",
+         "expr": "sum(vllm:num_requests_running{service=\"embed\"})"
+        },
+        {
+         "refId": "B",
+         "legendFormat": "排队等",
+         "expr": "sum(vllm:num_requests_waiting{service=\"embed\"})"
+        }
+       ]
+      },
+      {
+       "id": 99,
+       "type": "text",
+       "title": "怎么读这个仪表盘 / 一个坑",
+       "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 23
+       },
+       "options": {
+        "mode": "markdown",
+        "content": "### 为什么分位数用 `time_to_first_token_seconds` 而不是 `e2e_request_latency_seconds`\n\nvLLM 的 **e2e 延迟直方图桶边界是硬编码的**（`vllm/v1/metrics/buckets.py` 的\n`REQUEST_LATENCY_BUCKETS`），**最小桶 0.3 秒**：\n\n```\n0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 5, 10, 15, 20, 30, 40, 50, 60, 120, ...\n```\n\n而向量服务单条只要 **7 毫秒** → 所有请求都落进 `le=0.3` 这一个桶，\n`histogram_quantile` 只能在 [0, 0.3] 之间线性插值，算出来的\n「p50=150ms」**是插值产物，不是实测值**（真值 7.5ms，差 20 倍）。\n\n`time_to_first_token_seconds` 的桶是 **1ms 起**（`0.001, 0.005, 0.01, 0.02, 0.04, ...`），\n对 pooling 模型 **TTFT 就等于端到端延迟**（实测两者的 `_sum`/`_count` 完全相同：\n103.896s / 3961）—— 所以分位数面板用它。\n\n### 面板怎么读\n\n- **p50 / p90 / p99**：真实分位数。空载单条 ≈ 5–8 ms；批量 64 条摊薄后 ≈ 0.8–1.4 ms/条\n- **平均延迟拆解**：「排队」接近 0 说明没有积压；「推理」≈ 端到端的一半，\n  差额是 tokenize + HTTP 开销\n- **并发**：`排队等` 持续 > 0 才是真的过载信号（现在一直是 0）\n- 数据源：Prometheus `http://<WSL-IP>:30090`，抓取间隔 5s，保留 24h\n"
+       }
+      }
+     ]
+    }

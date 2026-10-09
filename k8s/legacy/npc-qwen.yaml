@@ -1,0 +1,109 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: npc-qwen
+  namespace: default
+  labels:
+    app: npc-qwen
+  annotations:
+    dsh/note: "Qwen3.5-0.8B 推理服务（游戏 NPC 对话用）；模型在 hostPath ~/npc-models"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: npc-qwen
+  strategy:
+    type: Recreate          # 单 GPU，Recreate 避免双实例抢显存
+  template:
+    metadata:
+      labels:
+        app: npc-qwen
+    spec:
+      containers:
+      - name: vllm
+        # ⚠ 关键：镜像已在 k3s 本地（kubectl get node 的 images 列表可见
+        #    vllm/vllm-openai:latest@sha256:8a69ffad...），但:
+        #    · tag=latest 时 K8s 把 IfNotPresent 当 Always，会强制重新拉取
+        #    · registry-1.docker.io 在 WSL 里连不上 → 卡在 ContainerCreating
+        #    解决：用 sha256 摘要固定（不触发拉取）或设 Never。这里用摘要 + IfNotPresent。
+        image: vllm/vllm-openai@sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90
+        imagePullPolicy: IfNotPresent
+        args:
+        - "--model"
+        - "/models/Qwen3.5-0.8B"
+        - "--served-model-name"
+        - "qwen3.5-0.8b"
+        - "--host"
+        - "0.0.0.0"
+        - "--port"
+        - "8000"
+        # 显存：gpu_memory_utilization 是「占可见总显存的比例」，含模型权重+KV cache
+        #   ❌ 0.30 会失败：容器可见约 4.5GB，0.3=1.35GB < 权重 1.63GB
+        #      实测报错：Available KV cache memory: -1.08 GiB
+        #   ✅ 0.60 ≈ 2.7GB，留够权重(1.63G)+多模态编码器+KV cache
+        - "--gpu-memory-utilization"
+        - "0.60"
+        - "--max-model-len"
+        - "4096"
+        # enforce-eager：省显存 + 启动快（先跑通，后续可去掉测性能）
+        - "--enforce-eager"
+        # 信任本地模型目录（否则 vLLM 会尝试连 HF）
+        - "--trust-remote-code"
+        env:
+        - name: NVIDIA_VISIBLE_DEVICES
+          value: "all"
+        - name: HF_HOME
+          value: "/root/.cache/huggingface"
+        - name: VLLM_LOGGING_LEVEL
+          value: "INFO"
+        ports:
+        - containerPort: 8000
+          name: http
+        resources:
+          limits:
+            cpu: "8"
+            memory: 8Gi
+          requests:
+            cpu: "1"
+            memory: 2Gi
+        # 探针：模型加载慢（多模态），给足 initialDelay
+        startupProbe:
+          httpGet: { path: /health, port: 8000 }
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          failureThreshold: 60      # 最多等 10 分钟（首次加载/拉镜像）
+        readinessProbe:
+          httpGet: { path: /health, port: 8000 }
+          periodSeconds: 15
+          failureThreshold: 6
+        livenessProbe:
+          httpGet: { path: /health, port: 8000 }
+          initialDelaySeconds: 300
+          periodSeconds: 30
+          failureThreshold: 6
+        volumeMounts:
+        - name: models
+          mountPath: /models
+          readOnly: true
+      volumes:
+      - name: models
+        hostPath:
+          path: /home/user/npc-models     # 家目录（免 sudo），与 /models 解耦
+          type: Directory
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: npc-qwen
+  namespace: default
+  labels:
+    app: npc-qwen
+spec:
+  type: NodePort
+  selector:
+    app: npc-qwen
+  ports:
+  - name: http
+    port: 8000
+    targetPort: 8000
+    nodePort: 30083

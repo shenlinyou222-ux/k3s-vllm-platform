@@ -1,0 +1,203 @@
+{
+  "title": "llama.cpp CPU 推理对照",
+  "uid": "llamacpp-mon",
+  "tags": [
+    "llamacpp",
+    "cpu",
+    "inference"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "5s",
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "annotations": {
+    "list": []
+  },
+  "templating": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "生成速度 (token/s) —— 对照 vLLM GPU",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 20
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "输入 prompt tok/s",
+          "expr": "llamacpp:prompt_tokens_seconds"
+        },
+        {
+          "refId": "B",
+          "legendFormat": "输出 predicted tok/s",
+          "expr": "llamacpp:predicted_tokens_seconds"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "槽位占用：处理中 / 排队（--parallel 1 单槽位）",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 20
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "processing 处理中",
+          "expr": "llamacpp:requests_processing"
+        },
+        {
+          "refId": "B",
+          "legendFormat": "deferred 排队中",
+          "expr": "llamacpp:requests_deferred"
+        },
+        {
+          "refId": "C",
+          "legendFormat": "busy slots/解码",
+          "expr": "llamacpp:n_busy_slots_per_decode"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "累计 token",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "prompt_total",
+          "expr": "llamacpp:prompt_tokens_total"
+        },
+        {
+          "refId": "B",
+          "legendFormat": "predicted_total",
+          "expr": "llamacpp:tokens_predicted_total"
+        },
+        {
+          "refId": "C",
+          "legendFormat": "prompt_cached(复用)",
+          "expr": "llamacpp:prompt_tokens_cached_total"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "累计解码次数",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 12,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "n_decode_total",
+          "expr": "llamacpp:n_decode_total"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "历史最大上下文 token",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "n_tokens_max",
+          "expr": "llamacpp:n_tokens_max"
+        }
+      ]
+    }
+  ]
+}

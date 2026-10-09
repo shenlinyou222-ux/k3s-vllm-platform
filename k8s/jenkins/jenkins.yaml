@@ -1,0 +1,192 @@
+﻿---
+# ══════════════════════════════════════════════════════════════
+#  k8s/jenkins.yaml —— Jenkins Controller（CI/CD 主节点）
+#
+#  ⭐ 三个关键设计（每个都有原因）：
+#
+#   ① JCasC 预设账号 → 不用人工注册
+#      casc.yaml 里声明用户 ops，密码从 Secret 注入。
+#
+#   ② ⭐ 用 Kubernetes 插件【动态创建】agent pod
+#      —— 不用预先跑常驻 agent，也不用去 UI 里拿 JENKINS_SECRET。
+#      Controller 的 SA 有权限创建 pod；agent pod 用 jenkins-agent 的 SA
+#      访问集群（kubectl 走 in-cluster config，无需 kubeconfig）。
+#
+#   ③ Controller 自己【不需要】docker.sock
+#      —— 构建在 agent pod 里做，Controller 只管调度。
+#
+#  ⚠️ Namespace 已拆到 k8s/jenkins-namespace.yaml（让 dry-run 能通过）
+#
+#  部署顺序见 k8s/README-jenkins.md
+# ══════════════════════════════════════════════════════════════
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: jenkins-home
+  namespace: cicd
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path-retain     # Retain：Jenkins 配置/凭据不能丢
+  resources:
+    requests:
+      storage: 10Gi
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jenkins-plugins
+  namespace: cicd
+data:
+  # ⚠️ 这份 ConfigMap【不再挂载】—— 插件已烘进 dsh/jenkins:1.0 镜像。
+  #    保留它作为【插件清单的文档】，改插件要重新构建镜像（见 _build-jenkins-images.sh）。
+  plugins.txt: |
+    # ⭐ JCasC（必须有，否则 casc.yaml 不生效）
+    configuration-as-code
+    # ── 流水线核心 ──
+    workflow-aggregator
+    pipeline-stage-view
+    pipeline-utility-steps
+    # ── SCM ──
+    git
+    git-client
+    # ── 凭据 ──
+    credentials
+    credentials-binding
+    plain-credentials
+    # ⭐ Kubernetes 插件（动态创建 agent pod）
+    kubernetes
+    kubernetes-credentials
+    # ── UI 辅助 ──
+    timestamper
+    build-timeout
+    ws-cleanup
+    # ── 通知（可选）──
+    mailer
+
+---
+# Controller 的 ServiceAccount：需要权限【创建/删除 agent pod】
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: jenkins-controller
+  namespace: cicd
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: jenkins-controller-pods
+  namespace: cicd
+rules:
+- apiGroups: [""]
+  resources: ["pods", "pods/exec", "pods/log", "pods/portforward"]
+  verbs: ["get", "list", "watch", "create", "delete", "patch", "update"]
+- apiGroups: [""]
+  resources: ["events", "secrets", "configmaps", "services", "persistentvolumeclaims"]
+  verbs: ["get", "list", "watch", "create", "delete", "patch", "update"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: jenkins-controller-pods
+  namespace: cicd
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: jenkins-controller-pods
+subjects:
+- kind: ServiceAccount
+  name: jenkins-controller
+  namespace: cicd
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jenkins
+  namespace: cicd
+  labels: {app: jenkins}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}              # 单副本 + RWO PVC → Recreate
+  selector:
+    matchLabels: {app: jenkins}
+  template:
+    metadata:
+      labels: {app: jenkins}
+    spec:
+      serviceAccountName: jenkins-controller
+      securityContext:
+        fsGroup: 1000
+      containers:
+      - name: jenkins
+        # ⭐ 派生镜像：构建期用 jenkins-plugin-cli 装了 86 个插件
+        #    为什么必须派生：官方镜像【不会】在启动时装 plugins.txt 里的插件
+        #    （那个机制是给派生镜像构建期用的）→ 没有 configuration-as-code
+        #    → casc.yaml 被忽略 → 账号建不出来
+        #    构建脚本: _build-jenkins-images.sh
+        image: dsh/jenkins:1.0
+        imagePullPolicy: IfNotPresent
+        ports:
+        - {name: http,  containerPort: 8080}
+        - {name: agent, containerPort: 50000}   # agent 隧道
+        env:
+        # ⭐ 跳过安装向导（账号由 JCasC 建）
+        - {name: JAVA_OPTS, value: "-Djenkins.install.runSetupWizard=false -Duser.timezone=Asia/Shanghai -Xmx1500m"}
+        # ⭐ JCasC 配置路径
+        - {name: CASC_JENKINS_CONFIG, value: "/var/jenkins_home/casc.yaml"}
+        # ⭐ 管理员密码（从 Secret 注入，casc.yaml 里用 ${JENKINS_ADMIN_PASSWORD} 引用）
+        - name: JENKINS_ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef: {name: jenkins-auth, key: admin-password}
+        - {name: TZ, value: "Asia/Shanghai"}
+        volumeMounts:
+        - {name: home,    mountPath: /var/jenkins_home}
+        - {name: casc,    mountPath: /var/jenkins_home/casc.yaml,        subPath: casc.yaml,    readOnly: true}
+        # ⭐ 工作仓库（只读）：留着给临时排查用（进 pod 看宿主工作区）
+        #    ⚠️ 流水线【不再】从这里读 —— 部署源是下面的裸仓库检出
+        - {name: repo,    mountPath: /srv/k3s-vllm-platform, readOnly: true}
+        # ⭐⭐ 裸仓库（只读）：`Pipeline script from SCM` 从这里检出
+        #    它是 git 的 origin —— 你在宿主 `git push` 推的就是它，
+        #    Jenkins 每 2 分钟轮询它（Jenkinsfile 的 pollSCM），有新提交就自动构建。
+        #    ⇒ 「push = 部署源」，宿主工作区里没提交的东西进不来。
+        #    k3s 跑在 WSL 里，节点的 /mnt/e 就是 Windows 的 E 盘
+        #    基础镜像自带 git，不需要额外装
+        - {name: gitremote, mountPath: /srv/k3s-vllm-platform.git, readOnly: true}
+        resources:
+          requests: {cpu: "200m", memory: "1Gi"}
+          limits:   {cpu: "2",    memory: "3Gi"}
+        readinessProbe:
+          httpGet: {path: /login, port: 8080}
+          initialDelaySeconds: 90
+          periodSeconds: 10
+          failureThreshold: 30
+        livenessProbe:
+          httpGet: {path: /login, port: 8080}
+          initialDelaySeconds: 300
+          periodSeconds: 30
+      volumes:
+      - name: home
+        persistentVolumeClaim: {claimName: jenkins-home}
+      - name: casc
+        configMap: {name: jenkins-casc}
+      - name: repo
+        hostPath: {path: /srv/k3s-vllm-platform, type: Directory}
+      - name: gitremote
+        hostPath: {path: /srv/k3s-vllm-platform.git, type: Directory}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jenkins
+  namespace: cicd
+  labels: {app: jenkins}
+spec:
+  type: NodePort
+  selector: {app: jenkins}
+  ports:
+  - {name: http,  port: 8080,  targetPort: 8080,  nodePort: 30080, protocol: TCP}
+  - {name: agent, port: 50000, targetPort: 50000, nodePort: 30500, protocol: TCP}

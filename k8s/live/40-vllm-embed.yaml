@@ -1,0 +1,140 @@
+# ══════════════════════════════════════════════════════════════
+#  40-vllm-embed.yaml —— 向量化（embedding）服务
+#
+#  和 10-vllm-mongo.yaml 里的 vllm-march7 是【两个独立服务】：
+#    vllm-march7  = 生成式 LLM（Qwen3.5-2B-March7-cn），/v1/chat/completions
+#    vllm-embed   = 向量模型（dmeta-embedding-zh-small），/v1/embeddings
+#  两者共用同一个 PV（models-pvc）和同一块 GPU，互不干扰：
+#    模型仓 PV models-pv → /home/user/npc-models 挂到 /models，
+#    所以「换模型」只是改下面 --model= 那一行，不需要动 PV。
+#
+#  ⭐ 为什么必须显式写 --runner=pooling：
+#    默认 runner 是 generate，vLLM 会把 BERT 当生成模型加载 → 起不来。
+#    （vLLM 0.30.0 实测 --runner {auto,draft,generate,pooling}）
+#
+#  ⭐ 池化方式不用配：
+#    vLLM 里 BertModel 带 @default_pooling_type(seq_pooling_type="CLS")，
+#    默认就是 CLS —— 与 DMetaSoul/Dmeta-embedding-zh-small 的
+#    1_Pooling/config.json（pooling_mode_cls_token=true）一致。
+#    但 use_activation 默认 True（会把向量 L2 归一化到 1.0），
+#    我们的读出头是在「未归一化的 CLS 向量」上训的 → 显式关掉。
+#
+#  ⭐ 验证不是"能返回向量"就算过：
+#    scripts/ci/verify-embed.py 拿 scripts/ci/embed_reference.json 里
+#    本地 HF 模型算出的参考向量逐条比对 cos ≥ 0.999 —— 这是唯一能证明
+#    池化方式 / activation / dtype 都配对的方法（配错了照样返回向量，
+#    但向量语义是错的，读出头会全崩）。
+#
+#  ⚠️ GPU 是与 vllm-march7 共享的（单节点 k3s，RTX 5060 8GB）：
+#    march7 占 gpu-memory-utilization=0.55，这里占 0.15 → 合计 0.70。
+#    调大这个值之前先看 nvidia-smi 还有多少余量。
+# ══════════════════════════════════════════════════════════════
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-embed
+  namespace: default
+  labels: {app: vllm-embed}
+spec:
+  replicas: 1
+  # 单副本 + Recreate：embedding 服务是幂等的，重建期间短暂不可用可接受。
+  # （用 RollingUpdate 反而会两个 pod 抢同一块 GPU）
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: vllm-embed}
+  template:
+    metadata:
+      labels: {app: vllm-embed}
+    spec:
+      securityContext:
+        fsGroup: 1000
+      containers:
+      - name: vllm
+        # 与 march7 同一个镜像（dsh/vllm-openai-patched:1.1 = vLLM 0.30.0 + logit_bias 白名单补丁）
+        # 补丁只影响生成路径，对 embedding 无副作用；共用镜像省一次构建。
+        image: dsh/vllm-openai-patched:1.1
+        imagePullPolicy: IfNotPresent
+        command: ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+        args:
+          # ⭐ 换模型 = 改这一行（路径在容器里是 /models/<目录名>）
+          - "--model=/models/dmeta-embedding-zh-small"
+          - "--served-model-name=dmeta-small"
+          # ⭐ 没有这一行就会被当生成模型加载，起不来
+          - "--runner=pooling"
+          - "--host=0.0.0.0"
+          - "--port=8000"
+          # 语料最长 33 token，512 足够；模型自身 max_position_embeddings=1024
+          - "--max-model-len=512"
+          # 与参考向量保持同一精度（模型 config 是 float32）
+          - "--dtype=float32"
+          # ⭐ 关掉池化的 L2 归一化（默认 True）
+          - '--pooler-config={"use_activation":false}'
+          # 与 march7 共用日志 dictConfig，运维口径一致
+          - "--log-config-file=/logcfg/uvicorn.json"
+          # 与 march7 共享 GPU：0.55 + 0.15 = 0.70，留 30% 余量
+          - "--gpu-memory-utilization=0.15"
+        ports:
+        # ⚠️ 不写 hostPort：march7 已占宿主 18081，且对外走 NodePort 就够了
+        - {name: vllm, containerPort: 8000}
+        env:
+        - {name: VLLM_ATTENTION_BACKEND, value: "FLASH_ATTN"}
+        - {name: HF_HUB_OFFLINE, value: "1"}
+        - {name: TRANSFORMERS_OFFLINE, value: "1"}
+        volumeMounts:
+        - {name: models, mountPath: /models, readOnly: true}
+        - {name: hfcache, mountPath: /root/.cache}
+        - {name: uvicorn-logcfg, mountPath: /logcfg, readOnly: true}
+        resources:
+          # ⭐ 2026-10-08 两件事：
+          #   ① 按实测峰值收紧 CPU/内存（原来 requests 1核/2Gi、limits 4核/6Gi）
+          #   ② 加上 nvidia.com/gpu（新装的 device plugin 提供的资源）
+          #
+          #  【CPU/内存的实测依据】（cgroup cpu.stat + memory.current）
+          #    空闲         0.013 核   2202 Mi
+          #    并发 8       2.182 核   2202 Mi
+          #    并发 16      1.929 核   2207 Mi
+          #    并发 32      2.108 核   2215 Mi
+          #    → CPU 峰值 2.18 核 —— 比 march7 还高，因为每个请求要 tokenize 32 条
+          #      文本并把 32×768 个浮点数序列化成 JSON，全是纯 CPU 活
+          #    → 内存 2215 Mi（模型只有 283 MiB，其余是 torch + CUDA context + 预分配池）
+          #    limits = 峰值 1.4× / 1.8×
+          #    ⚠️ CPU 余量偏小：跑大批量离线任务若见 throttling 就提到 4
+          #
+          #  【nvidia.com/gpu】说明见 70-nvidia-device-plugin.yaml 与 10-vllm-mongo.yaml。
+          #    实测本服务的显存占用是 693 MiB（差分测量：停掉它 GPU 从 7236 降到 6543）。
+          #    它只占 1 个 GPU 计数，与 march7 合计正好用满节点 advertise 的 2 个。
+          #    ⚠️ 扩展资源的 requests 与 limits 必须相等
+          requests: {cpu: "1", memory: "2Gi", nvidia.com/gpu: "1"}
+          limits: {cpu: "3", memory: "4Gi", nvidia.com/gpu: "1"}
+        startupProbe:
+          httpGet: {path: /health, port: 8000}
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          failureThreshold: 60
+        readinessProbe:
+          httpGet: {path: /health, port: 8000}
+          periodSeconds: 10
+          timeoutSeconds: 5
+
+      volumes:
+      - name: models
+        persistentVolumeClaim: {claimName: models-pvc, readOnly: true}
+      - name: hfcache
+        emptyDir: {}
+      - name: uvicorn-logcfg
+        configMap: {name: vllm-uvicorn-logcfg}
+      terminationGracePeriodSeconds: 30
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-embed
+  namespace: default
+  labels: {app: vllm-embed}
+spec:
+  type: NodePort
+  selector: {app: vllm-embed}
+  ports:
+  # 30802 未被占用（实测已占：30030 30080 30090 30097 30500 30800 30801 30871）
+  - {name: vllm-direct, port: 8000, targetPort: 8000, nodePort: 30802, protocol: TCP}

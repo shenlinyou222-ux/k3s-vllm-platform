@@ -1,0 +1,54 @@
+﻿{
+  "wsl_ip": "<WSL-IP>",
+  "endpoints": [
+    {
+      "name": "vLLM 代理（含审计）",
+      "port": 30800,
+      "path": "/v1",
+      "url_windows": "http://<WSL-IP>:30800/v1",
+      "url_wsl": "http://127.0.0.1:30800/v1"
+    },
+    {
+      "name": "vLLM 直连",
+      "port": 30801,
+      "path": "/v1",
+      "url_windows": "http://<WSL-IP>:30801/v1",
+      "url_wsl": "http://127.0.0.1:30801/v1"
+    },
+    {
+      "name": "MongoDB",
+      "port": 30017,
+      "path": "",
+      "url_windows": "http://<WSL-IP>:30017",
+      "url_wsl": "http://127.0.0.1:30017"
+    },
+    {
+      "name": "Prometheus",
+      "port": 30090,
+      "path": "",
+      "url_windows": "http://<WSL-IP>:30090",
+      "url_wsl": "http://127.0.0.1:30090"
+    },
+    {
+      "name": "Grafana",
+      "port": 30030,
+      "path": "",
+      "url_windows": "http://<WSL-IP>:30030",
+      "url_wsl": "http://127.0.0.1:30030"
+    },
+    {
+      "name": "Traefik (HTTP)",
+      "port": 30871,
+      "path": "",
+      "url_windows": "http://<WSL-IP>:30871",
+      "url_wsl": "http://127.0.0.1:30871"
+    },
+    {
+      "name": "Traefik (HTTPS)",
+      "port": 30097,
+      "path": "",
+      "url_windows": "http://<WSL-IP>:30097",
+      "url_wsl": "http://127.0.0.1:30097"
+    }
+  ]
+}

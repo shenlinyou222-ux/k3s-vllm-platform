@@ -1,0 +1,48 @@
+---
+# ══════════════════════════════════════════════════════════════
+#  k8s/live/30-vllm-uvicorn-logcfg.yaml
+#
+#  ConfigMap: vllm-uvicorn-logcfg  (namespace: default)
+#
+#  这个文件是从【集群里实际存在的对象】导出并纳入版本控制的。
+#  在此之前它只活在集群里（由一次性的 _*.sh 脚本创建，而 _*.sh 被
+#  .gitignore 排除）→ 从 main 重建集群会因为缺这个 CM 而让 pod 起不来，
+#  而且 kubectl diff 也看不见它的漂移。
+#
+#  ⚠️ 改完之后：Deployment 的 spec 没变 → 不会自动 rollout。
+#     deploy.sh 现在会检测到「CM 变了但 DE 没变」并【自动补一次重启】。
+#     （vLLM 只在启动时读一次配置，不重启不生效）
+# ══════════════════════════════════════════════════════════════
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vllm-uvicorn-logcfg
+  namespace: default
+data:
+  uvicorn.json: |
+    {
+      "version": 1,
+      "disable_existing_loggers": false,
+      "formatters": {
+        "default": {
+          "()": "uvicorn.logging.DefaultFormatter",
+          "fmt": "%(levelprefix)s %(asctime)s %(message)s",
+          "datefmt": "%Y-%m-%dT%H:%M:%S%z",
+          "use_colors": null
+        },
+        "access": {
+          "()": "uvicorn.logging.AccessFormatter",
+          "fmt": "%(levelprefix)s %(asctime)s %(client_addr)s - \"%(request_line)s\" %(status_code)s",
+          "datefmt": "%Y-%m-%dT%H:%M:%S%z"
+        }
+      },
+      "handlers": {
+        "default": { "formatter": "default", "class": "logging.StreamHandler", "stream": "ext://sys.stdout" },
+        "access":  { "formatter": "access",  "class": "logging.StreamHandler", "stream": "ext://sys.stdout" }
+      },
+      "loggers": {
+        "uvicorn":        { "handlers": ["default"], "level": "INFO", "propagate": false },
+        "uvicorn.error":  { "handlers": ["default"], "level": "INFO", "propagate": false },
+        "uvicorn.access": { "handlers": ["access"],  "level": "INFO", "propagate": false }
+      }
+    }

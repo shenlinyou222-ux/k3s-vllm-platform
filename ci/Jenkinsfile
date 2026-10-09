@@ -1,0 +1,262 @@
+﻿// ══════════════════════════════════════════════════════════════
+//  Jenkinsfile —— 声明式流水线
+//
+//  ⭐ 核心设计：Jenkinsfile 不重复实现任何逻辑，只调 scripts/ci/ 下的脚本。
+//     理由：
+//       · 脚本能手工跑（不依赖 Jenkins），也能被 Jenkins 调 → 单一事实来源
+//       · 本地调试和 CI 行为完全一致
+//       · Jenkins 挂了也不影响发布能力
+//
+//  ⚠️ 踩过的两个坑（已修）：
+//    ① agent 必须 runAsUser: 0
+//       /var/run/docker.sock 是 root:docker，jenkins 用户不在组里 → permission denied
+//       修复在 k8s/jenkins-casc.yaml 的 pod 模板里
+//    ② 失败时【不能无条件回滚】
+//       如果失败发生在【部署之前】（阶段①环境自检就挂），回滚会把一个
+//       根本没改过的 Deployment 滚回去 —— 实测把在跑的 vLLM 重启了。
+//       修复：只有【部署阶段真正开始过】才回滚。
+// ══════════════════════════════════════════════════════════════
+
+pipeline {
+    agent { label 'wsl-docker' }
+
+    environment {
+        // ⭐⭐ 部署源 = SCM 检出，不再读宿主的 /srv/k3s-vllm-platform 工作区。
+        //     脚本和清单都从 agent 的 workspace（$WORKSPACE）读 ——
+        //     所以部署的永远是你 push 上去的那一版，宿主工作区里没提交的
+        //     改动影响不到它。
+        //     ⚠️ 注意这里【不设 REPO/CI】：
+        //        · lib.sh 用 BASH_SOURCE 自己定位代码根，不需要传
+        //        · 下面 sh 块里的 "$WORKSPACE" 由 shell 展开（单引号，Groovy 不插值）
+        //        这样避免了 declarative environment 里 ${WORKSPACE} 的求值时机问题。
+
+        // 产物（state / 备份 / diff 日志）落宿主仓库：
+        //   agent 的 workspace 是 emptyDir，post.always 的 cleanWs() 会清掉它，
+        //   而回滚要用的 state 和备份必须活过这次构建。
+        CI_ARTIFACT_DIR = '/srv/k3s-vllm-platform/logs/ci'
+        NS       = 'default'                 // ⭐ vllm-march7 / vllm-embed 都在 default，不是 cicd
+        CI_YES   = '1'                       // 无人值守：跳过脚本里的人工确认
+        TZ       = 'Asia/Shanghai'
+
+        // ⭐⭐ 目标选择（2026-10-08 新增）：一个集群里现在有两个 vLLM 服务
+        //      march7 → deploy/vllm-march7  生成式 LLM，判据 tok/s
+        //      embed  → deploy/vllm-embed   向量服务，  判据 req/s
+        //    这个值只往下传（CI_TARGET），所有 case 判断都在 scripts/ci/lib.sh
+        //    里 —— Jenkinsfile 不重复实现逻辑（本文件开头的设计原则）。
+        CI_TARGET = "${params.TARGET}"
+
+        // 性能门槛：空 = 用 target 的默认值（march7=100 tok/s / embed=20 req/s），
+        // 由 verify.sh 里的 ${BENCH_MIN:-$BENCH_MIN_DEFAULT} 兜底。
+        BENCH_MIN = "${params.BENCH_MIN}"
+    }
+
+    options {
+        timeout(time: 40, unit: 'MINUTES')
+        disableConcurrentBuilds()
+        timestamps()
+        buildDiscarder(logRotator(numToKeepStr: '30'))
+    }
+
+    parameters {
+        // ⭐ TARGET 决定管哪个服务 / 跑哪套判据（见 environment 里的 CI_TARGET）
+        //    ⚠️ 自动触发（pollSCM）时没有参数 → params.TARGET 为 null
+        //       → CI_TARGET 为空 → lib.sh 里 ${CI_TARGET:-march7} 兜底成 march7
+        //       ⇒ 自动构建的默认行为与以前完全一致（管 vllm-march7）
+        choice(name: 'TARGET', choices: ['march7', 'embed'],
+               description: 'march7=生成式 LLM(vllm-march7) / embed=向量服务(vllm-embed)')
+        choice(name: 'MODE', choices: ['full', 'restart-only', 'dry'],
+               description: 'full=完整发布 / restart-only=只重启(ConfigMap改动) / dry=只预检')
+        booleanParam(name: 'SKIP_VERIFY', defaultValue: false,
+                     description: '跳过验证（不推荐）')
+        string(name: 'BENCH_MIN', defaultValue: '',
+               description: '性能门槛；留空=用 target 默认（march7: 100 tok/s，embed: 20 req/s）')
+    }
+
+    // ⭐⭐ 轮询 origin（裸仓库 /srv/k3s-vllm-platform.git）：有新提交就自动构建。
+    //     ⇒ 这就是「git push → 自动部署」。
+    //     为什么用轮询而不是 webhook：这是单机自建，没有一个能发 webhook 的
+    //     Git 服务端；也不想为它再装 Generic Webhook Trigger 插件并重建
+    //     Controller 镜像。代价是最多 ~2 分钟延迟，本地单机完全够用。
+    //     （要秒级触发 → 起 Gitea + 装 Generic Webhook Trigger，见 README）
+    //     ⚠️ 自动触发时没有参数 → params.MODE 为 null → 走 full 的语义，
+    //        但 k8s/live/ 没变的话 kubectl diff 为空，会直接判「无需发布」，
+    //        不会白重启服务。
+    triggers {
+        pollSCM('H/2 * * * *')
+    }
+
+    stages {
+        stage('① 环境自检') {
+            steps {
+                sh '''
+                  set -e
+                  echo "── 工具链 ──"
+                  for t in docker kubectl git python3 jq envsubst; do
+                    printf "  %-10s %s\\n" "$t" "$(command -v $t || echo 缺失)"
+                  done
+                  echo "── docker 连接（⭐ 这一条最容易挂）──"
+                  docker version --format "{{.Server.Version}}" || {
+                    echo "❌ 连不上 docker daemon"
+                    echo "   检查 pod 是否 runAsUser: 0（docker.sock 是 root:docker）"
+                    exit 1
+                  }
+                  echo "── 代码来源（⭐ SCM 检出，不是宿主工作区）──"
+                  [ -d "$WORKSPACE" ] || { echo "没有 workspace"; exit 1; }
+                  echo "   $WORKSPACE"
+                  git -C "$WORKSPACE" log --oneline -1
+                  echo "   k8s/live/ 内容:"
+                  ls -1 "$WORKSPACE/k8s/live/" | sed 's/^/     /'
+                  echo "── 目标（由 CI_TARGET 决定，profile 在 scripts/ci/lib.sh）──"
+                  eval "$(bash "$WORKSPACE/scripts/ci/target.sh")"
+                  echo "   CI_TARGET=$TARGET  →  deploy/$DEPLOY"
+                  echo "   功能验证 $VERIFY_PY   性能门槛 $BENCH_MIN_DEFAULT $BENCH_UNIT"
+                  echo "── 集群 ──"
+                  kubectl get nodes
+                  echo "── 目标工作负载 ──"
+                  kubectl -n "$NS" get deploy "$DEPLOY" -o wide 2>/dev/null || echo "  （没有 $DEPLOY）"
+                '''
+            }
+        }
+
+        stage('② 预检') {
+            steps {
+                script {
+                    // ⚠️⚠️ 必须 set +e：
+                    //   Jenkins 的 sh 步骤默认以 `sh -xe` 跑脚本。precheck.sh 在
+                    //   「无差异」时按约定 exit 2（用 2 区分"无需发布"和"预检通过"），
+                    //   带 -e 的话这一步【当场判失败】，后面的 echo "RC=$?" 根本
+                    //   执行不到 → 明明该走"无需发布"的正常路径，UI 上却是红叉。
+                    //   （实测：构建 #7 就是死在这里，"没有差异"被报成 FAILURE）
+                    // ⚠️ 单引号：让 shell 去展开 $WORKSPACE，Groovy 不插值
+                    def rc = sh(script: 'set +e; bash "$WORKSPACE/scripts/ci/precheck.sh"; echo "RC=$?"',
+                                returnStdout: true).trim()
+                    // ⭐⭐ 必须显式打印这一行：
+                    //   returnStdout 会把 precheck 的 stdout【全部捕获走】，
+                    //   不打印的话构建日志里只剩下面那句「预检退出码 = N」——
+                    //   diff 内容、模型权重校验、备份路径… 一个都看不见
+                    //   （用户点构建时完全不知道预检到底检查了什么）
+                    echo "───────── precheck.sh 输出 ─────────"
+                    echo rc
+                    echo "───────────────────────────────────"
+                    def code = (rc =~ /RC=(\d+)/)[0][1]
+                    echo "预检退出码 = ${code}"
+                    if (code == '2') {
+                        echo "⚠️ 无需发布（Deployment 无差异）"
+                        env.NO_DEPLOY = 'true'
+                    } else if (code != '0') {
+                        error("预检失败 rc=${code}")
+                    }
+                    if (params.MODE == 'dry') {
+                        echo "MODE=dry → 只预检，跳过 ③发布~⑥性能基准（与本地 pipeline.sh --dry 一致）"
+                    }
+                    if (params.MODE == 'restart-only') {
+                        echo "MODE=restart-only → 跳过 kubectl apply，只 rollout restart（给 ConfigMap 类改动用）"
+                    }
+                }
+            }
+        }
+
+        stage('③ 发布') {
+            // ⚠️ MODE 参数以前是【摆设】：Jenkinsfile 只调 precheck.sh/deploy.sh，
+            //    两个脚本都不读 MODE。后果：UI 上选 "dry=只预检" 照样真 apply
+            //    → 真重启 vLLM。这里按 pipeline.sh 的语义接上。
+            when { expression { return env.NO_DEPLOY != 'true' && params.MODE != 'dry' } }
+            steps {
+                script {
+                    // ⭐ 标记：部署【真正开始过】—— post.failure 靠它决定要不要回滚
+                    env.DEPLOY_STARTED = 'true'
+                    if (params.MODE == 'restart-only') {
+                        sh 'bash "$WORKSPACE/scripts/ci/restart.sh"'
+                    } else {
+                        sh 'bash "$WORKSPACE/scripts/ci/deploy.sh"'
+                    }
+                }
+            }
+        }
+
+        stage('④ 日志验证') {
+            when { expression { return env.NO_DEPLOY != 'true' && params.MODE != 'dry' } }
+            steps {
+                // ⭐ 判据本体在 verify.sh 里（按 CI_TARGET 分派 march7 / embed 两套）
+                //    Jenkinsfile 只选层 —— 不再把判据抄一份到这里。
+                //    以前这段内联逻辑只认 vllm-march7 的日志特征
+                //    （Using V2 Model Runner / overridden by /gencfg），
+                //    换成 embedding 服务必然全红。
+                sh 'bash "$WORKSPACE/scripts/ci/verify.sh" --layer=log'
+            }
+        }
+
+        stage('⑤ 功能验证') {
+            when { expression { return env.NO_DEPLOY != 'true' && params.MODE != 'dry' && !params.SKIP_VERIFY } }
+            steps {
+                sh 'bash "$WORKSPACE/scripts/ci/verify.sh" --layer=func'
+            }
+        }
+
+        stage('⑥ 性能基准') {
+            when { expression { return env.NO_DEPLOY != 'true' && params.MODE != 'dry' && !params.SKIP_VERIFY } }
+            steps {
+                // 门槛与单位都随 target 走（march7: tok/s ≥ 100；embed: req/s ≥ 20）
+                // BENCH_MIN 为空时 verify.sh 用 target 的默认值兜底
+                sh 'bash "$WORKSPACE/scripts/ci/verify.sh" --layer=bench'
+            }
+        }
+
+        stage('⑦ 记录结果') {
+            steps {
+                sh '''
+                  eval "$(bash "$WORKSPACE/scripts/ci/target.sh")"
+                  echo "── 目标工作负载（$DEPLOY）──"
+                  kubectl -n "$NS" get pods -l "$POD_SELECTOR" || true
+                  echo "── 镜像 ──"
+                  kubectl -n "$NS" get deploy "$DEPLOY" -o jsonpath='{.spec.template.spec.containers[0].image}' || true
+                  echo
+                  echo "── generation ──"
+                  kubectl -n "$NS" get deploy "$DEPLOY" -o jsonpath='{.metadata.generation}' || true
+                  echo
+                '''
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "✅ 流水线成功 (build #${BUILD_NUMBER})"
+        }
+        failure {
+            script {
+                // ⭐⭐ 只有【部署真正开始过】才回滚
+                //     阶段①②失败就回滚 = 把一个没改过的 Deployment 滚回去
+                //     —— 实测把正在服务的 vLLM 重启了，纯属自伤
+                if (env.DEPLOY_STARTED == 'true') {
+                    echo "❌ 部署阶段之后失败 → 自动回滚"
+                    sh 'bash "$WORKSPACE/scripts/ci/rollback.sh" || echo "回滚也失败 —— 需要人工介入！"'
+                } else {
+                    echo "❌ 失败发生在【部署之前】→ 不回滚（线上没被改动）"
+                }
+            }
+        }
+        always {
+            sh '''
+              eval "$(bash "$WORKSPACE/scripts/ci/target.sh")"
+              echo "── 目标工作负载状态（$DEPLOY）──"
+              kubectl -n "$NS" get pods -l "$POD_SELECTOR" || true
+              echo "── 最近日志 ──"
+              kubectl -n "$NS" logs deploy/"$DEPLOY" -c vllm --tail=15 2>/dev/null || true
+            '''
+        }
+        // ⚠️⚠️ cleanWs 必须放在 cleanup，【不能】放在 always。
+        //     declarative pipeline 的 post 条件执行顺序是：
+        //        always → changed/fixed/regression/aborted/failure/success/... → cleanup
+        //     也就是说 always 比 failure【先】跑。把 cleanWs() 放在 always 里，
+        //     失败时工作区已经被删掉了，failure 里的 rollback.sh 根本找不到：
+        //        + bash .../scripts/ci/rollback.sh
+        //        bash: .../rollback.sh: No such file or directory
+        //        + echo '回滚也失败 —— 需要人工介入！'
+        //     实测于 2026-10-08 构建 #24 —— 也就是说「失败自动回滚」这个功能
+        //     在此之前【从来没有真正生效过】（一直没失败过所以没暴露）。
+        cleanup {
+            cleanWs()
+        }
+    }
+}

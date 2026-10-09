@@ -1,0 +1,323 @@
+﻿---
+# ══════════════════════════════════════════════════════════════
+#  ⚠️ 2026-10-06 拆胶水（用户决定）：本文件原来同时描述
+#     ① vLLM ② 审计代理(log-proxy) ③ chinese_only 插件。
+#     现在只保留 vLLM 本身 + 纯配置（env / 日志格式）。
+#     已移除：log-proxy 容器、vllm-plugins ConfigMap、--logits-processors、
+#             plugins/audit-fallback 两个 volume。
+#     源码已归档到 k8s/legacy/（proxy_mongo.py、chinese_only.py），不再部署。
+#     回滚：./scripts/ci/rollback.sh（Deployment 类改动）
+#           ./scripts/ci/rollback.sh --from-backup（ConfigMap 类改动，undo 改不动 CM）
+#     本文件 2026-10-07 从 k8s/vllm-mongo.yaml 移到 k8s/live/，并纳入目录级
+#     apply（k8s/live/README.md 说明怎么改怎么发）。
+# ══════════════════════════════════════════════════════════════
+
+---
+# ══════════════════════════════════════════════════════════════
+#  vLLM 可观测性 / 请求相关 env（显式声明）
+#
+#  为什么显式写出来：
+#    vLLM 在 vllm/envs.py 里暴露了 302 个环境变量。我们把【可观测性 + 请求】
+#    这一小组显式化，好处有三：
+#      ① 一眼看到当前生效值（不用去翻 302 个里的那 17 个）
+#      ② 以后调整只改这个 ConfigMap，不用动 Deployment
+#      ③ 下面的值【等于当前默认值】→ 引入它零行为变化；
+#         之后每次改值都是"故意的"，而不是"顺手改的"
+#
+#  ⚠️ 两个陷阱：
+#    ① envFrom 会把【所有】键都注入成环境变量。键名必须严格正确 ——
+#       写错一个 VLLM_ 开头的键，vLLM 会打
+#       "Unknown vLLM environment variable detected" 警告
+#       （k8s 注入的 VLLM_MARCH7_* Service 变量就是这么触发那 14 行假警告的）
+#    ② 显式写默认值 = 把行为【钉住】。将来 vLLM 升级改了默认值，
+#       我们的显式值会覆盖新默认。所以只钉我们真正关心的这些，不要抄全 302 个。
+# ══════════════════════════════════════════════════════════════
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vllm-observability-env
+  namespace: default
+  labels: {app: vllm-march7, role: observability-env}
+data:
+  # ── 日志基础 ──
+  VLLM_LOGGING_LEVEL: "INFO"                  # 全局日志级别；临时排查改 "DEBUG"
+  VLLM_LOGGING_STREAM: "ext://sys.stdout"     # 日志流：kubectl logs 采集 stdout
+  VLLM_LOGGING_COLOR: "0"                     # 不要 ANSI 颜色码（容器无 tty，显式关）
+  VLLM_CONFIGURE_LOGGING: "1"                 # 让 vLLM 配置日志（0 = 完全不管）
+
+  # ── 日志内容 ──
+  VLLM_LOG_STATS_INTERVAL: "10"               # 吞吐/队列统计间隔（秒）
+  VLLM_DISABLE_LOG_LOGO: "0"                  # 1 = 关掉启动 banner（省 6 行噪音）
+  VLLM_LOG_MODEL_INSPECTION: "0"              # 1 = 加载后打印模型结构（很吵）
+
+  # ── 请求 id（与我们上一轮加的审计关联键直接相关）──
+  VLLM_DISABLE_REQUEST_ID_RANDOMIZATION: "0"  # 1 = 内部 request id 不加随机后缀。
+                                              #     现在日志里是 chatcmpl-xxx-a6e089be；
+                                              #     改成 1 后引擎 id 与 OpenAI id 完全一致（少一个形态）
+
+  # ── 调试开关（默认全关，需要时单独打开）──
+  VLLM_DEBUG_LOG_API_SERVER_RESPONSE: "0"     # 1 = 记录 API 响应体（排查用）
+  VLLM_TRACE_FUNCTION: "0"                    # 1 = 追踪每次函数调用（查 hang，极吵）
+  VLLM_SERVER_DEV_MODE: "0"                   # 1 = 开发模式（额外端点，别开）
+
+  # ── 日志格式统一（下一步的独立改动，故意先不设）──
+  # 设了它 = vLLM 和 uvicorn 都用同一个 dictConfig 文件
+  # （内容已纳管在 k8s/live/30-vllm-uvicorn-logcfg.yaml，原始的
+  #   k8s/uvicorn-logcfg.json 已归档到 k8s/legacy/）
+  # 目前不设，是为了让本次改动【零行为变化】
+  # VLLM_LOGGING_CONFIG_PATH: "/logcfg/uvicorn.json"
+
+---
+# ══════════════════════════════════════════════════════════════
+#  StorageClass
+# ══════════════════════════════════════════════════════════════
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: local-path-retain
+provisioner: rancher.io/local-path
+reclaimPolicy: Retain
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true
+
+---
+# ══════════════════════════════════════════════════════════════
+#  PV + PVC
+# ══════════════════════════════════════════════════════════════
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: models-pv
+  labels: {app: vllm-march7, role: models}
+spec:
+  capacity: {storage: 200Gi}
+  volumeMode: Filesystem
+  accessModes: [ReadOnlyMany]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-models
+  local:
+    path: /home/user/npc-models
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+      - matchExpressions:
+        - {key: kubernetes.io/hostname, operator: In, values: [desktop-a00thlv]}
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: models-pvc
+  namespace: default
+  labels: {app: vllm-march7, role: models}
+spec:
+  accessModes: [ReadOnlyMany]
+  storageClassName: local-models
+  volumeName: models-pv
+  resources: {requests: {storage: 200Gi}}
+
+---
+# 兜底数据（MongoDB 不可用时）
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: audit-fallback-pvc
+  namespace: default
+  labels: {app: vllm-march7, role: audit-fallback}
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path-retain
+  resources: {requests: {storage: 5Gi}}
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mask-cache-pvc
+  namespace: default
+  labels: {app: vllm-march7, role: cache}
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources: {requests: {storage: 2Gi}}
+
+---
+# ══════════════════════════════════════════════════════════════
+#  vLLM Deployment
+# ══════════════════════════════════════════════════════════════
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-march7
+  namespace: default
+  labels: {app: vllm-march7}
+spec:
+  # ⭐ 2026-10-08 缩容到 0 —— 把 GPU 让给别的模型（下一步是语音模型）。
+  #    缩到 0 之后：
+  #      · 不再占 nvidia.com/gpu 计数（没有 pod 就没有申请）
+  #      · 不再占显存（原来实测 6543 MiB）
+  #      · verify.sh 检测到 replicas=0 会【跳过验证】而不是报失败
+  #    想恢复：把这里改回 1 → commit → push（Jenkins 自动发布）
+  #    ⚠️ 模型权重和 PVC 都还在，恢复只需要几十秒
+  replicas: 0
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: vllm-march7}
+  template:
+    metadata:
+      labels: {app: vllm-march7}
+    spec:
+      securityContext:
+        fsGroup: 1000
+      containers:
+      # ── vLLM（运维日志 → stdout）──
+      - name: vllm
+        # ⭐ 2026-10-06 薄派生镜像：在官方镜像上叠一层，替换 config/model.py
+        #    补丁 = 给 available_params 白名单加 "logit_bias"（5 行，其中 1 行代码）
+        #    目的 = 让 logit_bias 能作为服务端默认值 → 保住 V2 model runner
+        #    基镜像: vllm/vllm-openai@sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90
+        #    镜像ID: sha256:2f3d75b335564bb65c47edbf3e300320485594483dfda20c28d4ff5e9d9e81fa
+        #    构建  : REPO\_build-patched.sh
+        #    校验  : REPO\_verify-patched-image.sh
+        #    ⚠ v1.1 = v1.0 + 补丁2（protocol.py 的 to_sampling_params 查默认值）
+        #       v1.0 只有补丁1，实测【不生效】—— to_sampling_params 里
+        #       logit_bias 那一行直接用了请求的值，没查 default_sampling_params
+        image: dsh/vllm-openai-patched:1.1
+        imagePullPolicy: IfNotPresent
+        command: ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+        args:
+          # ⭐ 2026-10-06 换成【裁剪词表】的模型：
+          #    原 vocab 248,320 → 54,818（merge 闭包 54,793 + added 25）
+          #    embed/lm_head 485.0 MB → 107.1 MB（4.53x）
+          #    输出投影乘加 254.3M → 56.1M / step
+          #    tokenizer 已同步重编号（vocab 54,793 + added 25，merges 54,657）
+          #    ⚠ 词表里仍含 472 个 merge 中间产物（解码为 \ufffd）
+          #      需要 logits processor 屏蔽，见 output_banned_ids.pt
+          #    --served-model-name 不变（march7v3）→ 客户端无需改动
+          #    回滚：把下面这行改回 /models/Qwen3.5-0.8B-March7-v4
+          # ⭐ 2026-10-06 切到 2B 模型（prompt 注入方式，无 LoRA）
+          #    vocab 248,320 → 54,818（同 0.8B 的裁剪流程）
+          #    embed 970.0 MB → 214.1 MB
+          #    ⚠ 2B 的 config 是 qwen3_5（多模态），比 0.8B 的 qwen3_5_text 多视觉部分
+          #    回滚：改回 /models/Qwen3.5-0.8B-March7-cn
+          - "--model=/models/Qwen3.5-2B-March7-cn"
+          - "--served-model-name=march7v3"
+          - "--host=0.0.0.0"
+          - "--port=8000"
+          # 2B 权重约 1.6 GiB，比 0.8B 的 1.06 GiB 大 → 提高比例保证 KV cache
+          #
+          # ⚠️ 2026-10-08：改用【显式】--kv-cache-memory，不再只靠 gpu-memory-utilization
+          #
+          #   为什么：--gpu-memory-utilization 是个黑箱系数 —— 它只用来【算】KV cache
+          #   该多大，算出来多少完全看不出来。实测 march7 的日志说：
+          #     Available KV cache memory: 0.7 GiB   （22,937 tokens，2048-token 请求并发 11.2×）
+          #     Actual usage is 1.83 GiB consumed + 1.84 GiB peak activation + 0.07 CUDAGraph
+          #   而进程实际占 6543 MiB —— 比 0.55 折算的预算（4483 MiB）还多 46%，
+          #   因为 CUDA context 和 torch 分配器不在这个预算的管辖范围内。
+          #   vLLM 自己也建议了显式值：
+          #     "Replace gpu_memory_utilization config with --kv-cache-memory=522079744
+          #      (0.49 GiB) to fit into requested memory, or --kv-cache-memory=3197111808
+          #      (2.98 GiB) to fully utilize gpu memory."
+          #
+          #   这里取 1 GiB（1073741824）—— 比现在的 0.7 GiB 略大（并发更宽裕），
+          #   但【有上界】：设置它之后 vLLM 跳过内存探测、直接分配这么多 KV cache，
+          #   所以 march7 的显存占用变得可预测，方便和别的模型共用这张卡。
+          #   缩到 0 副本期间这个参数不生效；将来扩容回来才起作用。
+          - "--kv-cache-memory=1073741824"
+          # 保留 utilization 作为"总预算上限"（vLLM 仍用它校验其它分配）
+          - "--gpu-memory-utilization=0.55"
+          - "--max-model-len=2048"
+          - "--max-num-seqs=64"
+          - "--trust-remote-code"
+          - "--enable-log-requests"
+          # 原生的"记录模型输出"：拆掉审计代理后，日志成为唯一的请求留痕
+          - "--enable-log-outputs"
+          - "--log-config-file=/logcfg/uvicorn.json"
+          # ⭐ 屏蔽 472 个非中文 token —— 改用 logit_bias 服务端默认值
+          #    （走 --generation-config，由 /gencfg/generation_config.json 提供）
+          #    这样【不会】触发 custom logits processors 的 V1 回退
+          - "--generation-config=/gencfg"
+        ports:
+        - {name: vllm, containerPort: 8000, hostPort: 18081}
+        env:
+        - {name: VLLM_ATTENTION_BACKEND, value: "FLASH_ATTN"}
+        - {name: VLLM_USE_FLASHINFER_SAMPLER, value: "0"}
+        - {name: HF_HUB_OFFLINE, value: "1"}
+        - {name: TRANSFORMERS_OFFLINE, value: "1"}
+        # 可观测性 / 请求相关的 env 集中放在 ConfigMap 里显式声明
+        # （显式 env 的优先级高于 envFrom，所以上面的不会被覆盖）
+        envFrom:
+        - configMapRef: {name: vllm-observability-env}
+        volumeMounts:
+        - {name: models, mountPath: /models, readOnly: true}
+        - {name: mask-cache, mountPath: /cache}
+        - {name: hfcache, mountPath: /root/.cache}
+        - {name: uvicorn-logcfg, mountPath: /logcfg, readOnly: true}
+        - {name: gencfg, mountPath: /gencfg, readOnly: true}
+        resources:
+          # ⭐ 2026-10-08 两件事：
+          #   ① 按实测峰值收紧 CPU/内存（原来 requests 2核/4Gi、limits 8核/12Gi）
+          #   ② 加上 nvidia.com/gpu —— 这是本次新装的 device plugin 提供的资源
+          #
+          #  【CPU/内存的实测依据】（cgroup cpu.stat + memory.current，不是 kubectl top）
+          #    空闲         0.009 核   3981 Mi
+          #    并发 8       1.122 核   3981 Mi
+          #    并发 16      1.062 核   3981 Mi
+          #    并发 32      0.944 核   3982 Mi
+          #    → CPU 峰值 1.12 核（并发升高反而不涨，瓶颈在 GPU 不在 CPU）
+          #    → 内存完全平坦（vLLM 启动即预分配完毕，稳态就是稳态）
+          #    limits = 峰值 2.7× / 1.5×
+          #
+          #  【nvidia.com/gpu 的说明】
+          #    · 它是【整数计数】不是显存 —— "1" 表示"要一整块 GPU"，
+          #      k8s 没有"申请 2Gi 显存"这种写法（见 70-nvidia-device-plugin.yaml）
+          #    · 节点上 advertise 了 2 个（time-slicing replicas=2），
+          #      march7 + embed 各占 1 个，正好用满
+          #    · ⚠️ 在 WSL 上它只做【调度准入】不做强制隔离：dockerd 的
+          #      default-runtime=nvidia 会给所有容器注入 /dev/dxg，
+          #      所以即使不申请也能用 GPU。显存仍然只能靠
+          #      --gpu-memory-utilization / --kv-cache-memory 来分
+          #    · ⚠️ 扩展资源的 requests 与 limits 必须相等（k8s 的硬规定）
+          requests: {cpu: "1", memory: "4Gi", nvidia.com/gpu: "1"}
+          limits: {cpu: "3", memory: "6Gi", nvidia.com/gpu: "1"}
+        startupProbe:
+          httpGet: {path: /health, port: 8000}
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          failureThreshold: 90
+        readinessProbe:
+          httpGet: {path: /health, port: 8000}
+          periodSeconds: 10
+          timeoutSeconds: 5
+
+      volumes:
+      - name: models
+        persistentVolumeClaim: {claimName: models-pvc, readOnly: true}
+      - name: mask-cache
+        persistentVolumeClaim: {claimName: mask-cache-pvc}
+      - name: hfcache
+        emptyDir: {}
+      - name: uvicorn-logcfg
+        configMap: {name: vllm-uvicorn-logcfg}
+      # 服务端默认采样参数（含 472 条 logit_bias，屏蔽裁剪词表里的非中文 token）
+      - name: gencfg
+        configMap: {name: vllm-gencfg-2b}
+      terminationGracePeriodSeconds: 30
+
+---
+# ══════════════════════════════════════════════════════════════
+#  Service
+# ══════════════════════════════════════════════════════════════
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-march7
+  namespace: default
+  labels: {app: vllm-march7}
+spec:
+  type: NodePort
+  selector: {app: vllm-march7}
+  ports:
+  # 拆掉审计代理后，30800 直接指向 vLLM 的 8000（客户端端口不变）
+  - {name: proxy, port: 8001, targetPort: 8000, nodePort: 30800, protocol: TCP}
+  - {name: vllm-direct, port: 8000, targetPort: 8000, nodePort: 30801, protocol: TCP}

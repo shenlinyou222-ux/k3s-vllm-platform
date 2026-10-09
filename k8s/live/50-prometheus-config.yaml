@@ -1,0 +1,77 @@
+# ══════════════════════════════════════════════════════════════
+#  50-prometheus-config.yaml —— Prometheus 抓取配置
+#
+#  2026-10-08 从集群里【导出并纳管】。为什么要纳管：
+#    这份 CM 原来是 12 天前用一次性脚本建到集群里的，仓库里没有 ——
+#    于是 kubectl diff 看不见它的漂移，而它里面的抓取目标早就烂了：
+#      vllm-qwen.default.svc.cluster.local:8000    ← 服务已不存在（target DOWN）
+#      llama-qwen.default.svc.cluster.local:8000   ← 服务已不存在（target DOWN）
+#    结果：跑了两天的 vllm-march7 和刚上线的 vllm-embed 都【没有被监控】，
+#    Grafana 上那条 vLLM 曲线一直是空的。这正是 README 里记过的
+#    「CM 不在仓库 → 漂移无人知」那个坑，第二次踩。
+#
+#  ⚠️ 改了这份 CM 之后要【手动重载】Prometheus（apply 不会重启 pod）：
+#      curl -X POST http://<WSL-IP>:30090/-/reload
+#    （Prometheus 启动参数里已有 --web.enable-lifecycle，所以 reload 可用）
+#    重载后到 http://<WSL-IP>:30090/targets 确认 target 都是 UP。
+#
+#  ⚠️ 与 vLLM 的 ConfigMap 不同，deploy.sh 的「CM 变了自动重启」逻辑
+#     只认【目标 Deployment 引用的 CM】。Prometheus 的 CM 不属于
+#     vllm-march7 / vllm-embed 任何一方，所以不会自动重启 —— 必须手动 reload。
+# ══════════════════════════════════════════════════════════════
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: monitoring
+  labels: {app: prometheus}
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 5s
+      evaluation_interval: 5s
+    scrape_configs:
+      - job_name: prometheus
+        static_configs:
+          - targets: ['localhost:9090']
+
+      # ⭐ vLLM 推理服务（Prometheus 原生指标）
+      #    两个服务共用一个 job，靠 instance / service 标签区分：
+      #      service=march7  生成式 LLM   Qwen3.5-2B-March7-cn
+      #      service=embed   向量服务     dmeta-embedding-zh-small
+      #    ⚠️ 端口用 8000（两个 Service 的 targetPort 都是 8000）
+      - job_name: vllm
+        metrics_path: /metrics
+        static_configs:
+          - targets: ['vllm-march7.default.svc.cluster.local:8000']
+            labels:
+              engine: vllm
+              device: gpu
+              service: march7
+          - targets: ['vllm-embed.default.svc.cluster.local:8000']
+            labels:
+              engine: vllm
+              device: gpu
+              service: embed
+
+      # ⚠️ llama.cpp CPU 服务（llama-qwen）已经不存在了，target 长期 DOWN。
+      #    保留 job 是为了让 /targets 页面上能看出「这里曾经有过一个服务」，
+      #    真要清理就把这一段删掉。需要 llama.cpp 的指标时它要带 --metrics 启动。
+      - job_name: llamacpp
+        metrics_path: /metrics
+        static_configs:
+          - targets: ['llama-qwen.default.svc.cluster.local:8000']
+            labels:
+              engine: llamacpp
+              device: cpu
+
+      # GPU 硬件指标（WSL 内 nvidia-smi exporter；DCGM 官方不支持 WSL2）
+      # ⚠️ 公开版：原值是 WSL 的内网 IP（示例值，非敏感），这里改成占位符。
+      #    复刻时换成你自己的 WSL IP —— 用 tools/sync_k3s_endpoint.py 可以打印它。
+      - job_name: nvidia_gpu
+        metrics_path: /metrics
+        static_configs:
+          - targets: ['<WSL-IP>:9400']
+            labels:
+              engine: nvidia-smi-exporter
+              device: gpu

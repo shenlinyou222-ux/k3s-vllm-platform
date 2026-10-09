@@ -1,0 +1,111 @@
+# ══════════════════════════════════════════════════════════════
+#  80-llama-asr.yaml —— 语音转写服务（Qwen3-ASR，llama.cpp，CPU）
+#
+#  ⭐ 为什么是 CPU：这台机器的语音转写一直是「零显存」设计 ——
+#    原来跑在 Windows 侧的 llama-server.exe（CPU），不占 GPU。
+#    搬进 k8s 保持这个策略：**不申请 nvidia.com/gpu、不占显存**，
+#    把 GPU 留给真正需要它的模型（embed 已占 1 槽，march7 已缩到 0）。
+#
+#  ⭐ 搬进来之前是什么状态：
+#    · llama-server.exe   :8124   （Windows 侧进程，一次性脚本拉起，死了就没了）
+#    · voice_stt_server.py:8019   （Windows Python，转发到 8124）
+#    两个都只绑 Windows 的 127.0.0.1 → 从 WSL/k8s 里根本访问不到，
+#    也没有任何健康检查/重启保障。这就是「没纳管」。
+#
+#  ⭐ 镜像：走 ghcr 的南京大学镜像源，不是 ghcr.io —— 因为 dockerd 走代理，
+#    而 NO_PROXY 里只有 ghcr.io，没有 blob 的 CDN（pkg-containers.githubusercontent.com）
+#    → 拉 ghcr.io 时 manifest 能拿到、blob 下载报 unexpected EOF。
+#    ghcr.nju.edu.cn 已在 NO_PROXY 里，直连可拉（实测成功）。
+#    （另一个可用源：ghcr.dockerproxy.net）
+#
+#  ⚠️ 参数用长写法 --model 而不是 -m：
+#    scripts/ci/check-models.py 靠正则找 `--model=`/`--model ` 来做
+#    「路径存在性 + sha256 指纹」校验。用 -m 的话模型完全不在预检管辖内，
+#    路径写错要等 rollout 900s 超时才暴露。
+#
+#  ⚠️ 与旧链路的兼容性【本次不管】：voice_stt_server.py(:8019) 仍然指向
+#    Windows 的 8124。要切到 k8s 需要改它的目标地址 —— 那是下一步的事。
+#    本清单只负责「让模型服务本身进 k8s 被管起来」。
+# ══════════════════════════════════════════════════════════════
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llama-asr
+  namespace: default
+  labels: {app: llama-asr}
+spec:
+  replicas: 1
+  # 单副本 + Recreate：转写服务是无状态的，重建期间短暂不可用可接受。
+  # 用 RollingUpdate 反而会两个 pod 同时把 1.4GB 模型读进内存。
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: llama-asr}
+  template:
+    metadata:
+      labels: {app: llama-asr}
+    spec:
+      securityContext:
+        fsGroup: 1000
+      containers:
+      - name: llama-server
+        # ⚠️ 走镜像源（见文件头说明）；换成 ghcr.io 会因代理拉不下来
+        image: ghcr.nju.edu.cn/ggml-org/llama.cpp:server
+        imagePullPolicy: IfNotPresent
+        # 镜像的 Entrypoint 是 /app/llama-server，这里只给参数
+        args:
+          - "--model"
+          - "/models/qwen3-asr-1.7b/Qwen3-ASR-1.7B-Q4_K_M.gguf"
+          - "--mmproj"
+          - "/models/qwen3-asr-1.7b/mmproj-Qwen3-ASR-1.7B-Q4_K_M.gguf"
+          - "--host"
+          - "0.0.0.0"
+          - "--port"
+          - "8000"
+          # 和原来 Windows 侧一致：上下文 4096
+          - "-c"
+          - "4096"
+          # ⭐ 显式限制线程数：llama.cpp 默认用满 nproc（这台是 20），
+          #    不限制的话一个转写请求就能把节点 CPU 吃满。
+          #    6 线程对 1.7B Q4 足够；配合下面的 cpu limits。
+          - "-t"
+          - "6"
+          - "--no-webui"
+        ports:
+        - {name: http, containerPort: 8000}
+        volumeMounts:
+        - {name: models, mountPath: /models, readOnly: true}
+        resources:
+          # 首次部署先给保守值，实测后再收紧（照 vllm 那套做法）
+          # 参考：Windows 侧那个 llama-server 进程 WorkingSet ≈ 446 MiB
+          #（模型是 mmap 读的，不算进 RSS；容器里 cgroup 会算上 page cache）
+          requests: {cpu: "500m", memory: "1Gi"}
+          limits: {cpu: "4", memory: "3Gi"}
+        startupProbe:
+          # 1.4GB 模型要从 PV 读进来，给足启动时间（最长 5 分钟）
+          httpGet: {path: /health, port: 8000}
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          failureThreshold: 60
+        readinessProbe:
+          httpGet: {path: /health, port: 8000}
+          periodSeconds: 10
+          timeoutSeconds: 5
+
+      volumes:
+      - name: models
+        persistentVolumeClaim: {claimName: models-pvc, readOnly: true}
+      terminationGracePeriodSeconds: 30
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: llama-asr
+  namespace: default
+  labels: {app: llama-asr}
+spec:
+  type: NodePort
+  selector: {app: llama-asr}
+  ports:
+  # 30803 实测空闲（已占：30030 30080 30090 30097 30500 30800 30801 30802 30871）
+  - {name: http, port: 8000, targetPort: 8000, nodePort: 30803, protocol: TCP}

@@ -1,0 +1,44 @@
+﻿---
+# ══════════════════════════════════════════════════════════════
+#  k8s/jenkins-agent-rbac.yaml —— Agent Pod 用的 ServiceAccount + RBAC
+#
+#  ⚠️ 注意区分两个 SA：
+#    · jenkins-controller（在 jenkins.yaml 里）—— Controller 用它【创建 agent pod】
+#    · jenkins-agent（本文件）—— agent pod 用它【操作集群】（kubectl apply 等）
+#
+#  为什么 Agent 用 SA 而不是挂 kubeconfig：
+#    /etc/rancher/k3s/k3s.yaml 里的 server 是 https://127.0.0.1:6443
+#    —— 在 Pod 里 127.0.0.1 是 Pod 自己，不通。
+#    k8s 会自动注入 KUBERNETES_SERVICE_HOST + SA token，
+#    kubectl 直接用 in-cluster config 即可 ✅
+#
+#  ⚠️ 为什么给 cluster-admin：
+#    流水线要操作 Deployment / Service / ConfigMap / PVC / Pod，
+#    本地单节点集群直接给最省事。
+#    生产环境应该收窄成具体的 Role（只给 default 命名空间的写权限）。
+# ══════════════════════════════════════════════════════════════
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: jenkins-agent
+  namespace: cicd
+  labels:
+    app.kubernetes.io/part-of: k3s-vllm-platform
+    role: jenkins-agent
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: jenkins-agent-admin
+  labels:
+    app.kubernetes.io/part-of: k3s-vllm-platform
+    role: jenkins-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cluster-admin
+subjects:
+- kind: ServiceAccount
+  name: jenkins-agent
+  namespace: cicd

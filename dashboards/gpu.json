@@ -1,0 +1,263 @@
+{
+  "title": "GPU 监控 (nvidia-smi / RTX 5060)",
+  "uid": "gpu-mon",
+  "tags": [
+    "gpu",
+    "nvidia",
+    "wsl"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "5s",
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "annotations": {
+    "list": []
+  },
+  "templating": {
+    "list": []
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "GPU 计算利用率 %",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 25
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "{{name}}",
+          "expr": "nvidia_smi_utilization_gpu_percent"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "显存占用 MiB（used / total）",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "decmbytes",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 20
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "已用",
+          "expr": "nvidia_smi_memory_used_mib"
+        },
+        {
+          "refId": "B",
+          "legendFormat": "总量",
+          "expr": "nvidia_smi_memory_total_mib"
+        },
+        {
+          "refId": "C",
+          "legendFormat": "空闲",
+          "expr": "nvidia_smi_memory_free_mib"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "显存带宽利用率 % / SM 时钟 MHz",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "显存带宽 %",
+          "expr": "nvidia_smi_utilization_memory_percent"
+        },
+        {
+          "refId": "B",
+          "legendFormat": "SM 时钟 MHz",
+          "expr": "nvidia_smi_clock_sm_mhz"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "温度 °C",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "celsius",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 20
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "温度",
+          "expr": "nvidia_smi_temperature_celsius"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "功耗 W（对照上限）",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "watt",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 20
+          }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "当前功耗",
+          "expr": "nvidia_smi_power_draw_watts"
+        },
+        {
+          "refId": "B",
+          "legendFormat": "功耗上限",
+          "expr": "nvidia_smi_power_limit_watts"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "关联分析：GPU 利用率 %  vs  vLLM 并发请求数  vs  显存已用",
+      "description": "看负载如何驱动 GPU。注：WSL2 不支持按进程统计显存，故不展示进程维度。",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prom"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 16
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "vLLM 并发请求"
+            },
+            "properties": [
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
+          }
+        ]
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "legendFormat": "GPU 利用率 %",
+          "expr": "nvidia_smi_utilization_gpu_percent"
+        },
+        {
+          "refId": "B",
+          "legendFormat": "显存已用 MiB",
+          "expr": "nvidia_smi_memory_used_mib"
+        },
+        {
+          "refId": "C",
+          "legendFormat": "vLLM 并发请求",
+          "expr": "vllm:num_requests_running"
+        }
+      ]
+    }
+  ]
+}

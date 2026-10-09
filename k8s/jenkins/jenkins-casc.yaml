@@ -1,0 +1,143 @@
+﻿---
+# ══════════════════════════════════════════════════════════════
+#  k8s/jenkins-casc.yaml —— Jenkins Configuration as Code (JCasC)
+#
+#  为什么用 JCasC（而不是点 UI）：
+#    ① 账号脚本化 —— 不用人工注册
+#    ② 密码从 Secret 注入 —— 不写明文
+#    ③ ⭐ 用 k8s plugin 动态创建 agent pod —— 连 agent secret 都省了
+#    ④ 每次启动自动对齐 —— UI 里改乱了，重启就恢复
+#
+#  ⚠️ 需要 configuration-as-code 插件（见 jenkins.yaml 的 plugins.txt）
+# ══════════════════════════════════════════════════════════════
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: jenkins-casc
+  namespace: cicd
+data:
+  casc.yaml: |
+    jenkins:
+      systemMessage: "k3s-vllm-platform CI/CD —— 流水线脚本在 scripts/ci/，用法见 README"
+
+      # ── ① 账号：脚本化创建，不用人工注册 ──
+      securityRealm:
+        local:
+          allowsSignup: false          # 禁止自助注册
+          users:
+          - id: "ops"
+            password: "${JENKINS_ADMIN_PASSWORD}"    # 从环境变量注入（见 jenkins.yaml）
+            properties:
+            # ⚠️ 属性名必须是 emailAddress —— 写成 address 会让 JCasC 抛
+            #    UnknownAttributesException → ConfigurationAsCodeBootFailure
+            #    → Jenkins 启动失败 → 容器 CrashLoopBackOff（实测踩过）
+            - mailer:
+                emailAddress: "ops@k3s-vllm.local"
+
+      # ── 授权：登录后可做任何事（本地单人环境）──
+      authorizationStrategy:
+        loggedInUsersCanDoAnything:
+          allowAnonymousRead: false
+
+      # ── 全局环境变量（build 里可见）──
+      globalNodeProperties:
+      - envVars:
+          env:
+          - key: TZ
+            value: "Asia/Shanghai"
+          - key: REPO
+            value: "/srv/k3s-vllm-platform"
+
+      # ── ② 云：Kubernetes 插件动态创建 agent pod ──
+      #     ⭐ 这是关键设计：不用预先跑常驻 agent，也不用人工拿 secret
+      clouds:
+      - kubernetes:
+          name: "k8s"
+          # Controller 用 in-cluster config 访问 API
+          serverUrl: "https://kubernetes.default.svc"
+          namespace: "cicd"
+          jenkinsUrl: "http://jenkins.cicd.svc.cluster.local:8080"
+          jenkinsTunnel: "jenkins.cicd.svc.cluster.local:50000"
+          connectTimeout: 30
+          readTimeout: 60
+          containerCapStr: "4"           # 最多 4 个并发 build
+          podLabels:
+          - key: "managed-by"
+            value: "jenkins"
+          templates:
+          - name: "wsl-docker"
+            namespace: "cicd"
+            label: "wsl-docker"          # ⭐ Jenkinsfile 里的 agent { label 'wsl-docker' }
+            serviceAccount: "jenkins-agent"   # 用 SA → kubectl 在 pod 里能访问集群
+            idleMinutes: 0
+            instanceCapStr: "2"
+            podRetention: "never"        # build 完立刻删 pod
+            # ⭐ 必须以 root 跑：
+            #    /var/run/docker.sock 是 srw-rw---- root:docker (gid 989)
+            #    jenkins 用户(uid 1000) 不在 docker 组 → permission denied（实测踩过）
+            yaml: |
+              spec:
+                securityContext:
+                  runAsUser: 0
+                  runAsGroup: 0
+                containers:
+                - name: jnlp
+                  securityContext:
+                    runAsUser: 0
+            # ⭐ 三个关键挂载（原因见 k8s/jenkins-agent.yaml 的注释）
+            volumes:
+            - hostPathVolume:
+                hostPath: "/var/run/docker.sock"
+                mountPath: "/var/run/docker.sock"
+            - hostPathVolume:
+                hostPath: "/srv/k3s-vllm-platform"
+                mountPath: "/srv/k3s-vllm-platform"     # ⭐ 挂到【相同路径】
+            # ⭐⭐ 裸仓库（SCM 源）也必须挂给 agent！
+            #    「Pipeline script from SCM」的 checkout 是跑在【agent pod】里的，
+            #    不是在 Controller 里 —— 实测构建 #13 报
+            #      fatal: '/srv/k3s-vllm-platform.git' does not appear to be a git repository
+            #    因为当时只有 Controller 挂了它。同样挂到【相同路径】。
+            - hostPathVolume:
+                hostPath: "/srv/k3s-vllm-platform.git"
+                mountPath: "/srv/k3s-vllm-platform.git"
+            # ⭐⭐ 模型权重目录 —— 给【预检】校验权重用（check-models.py）
+            #    kubectl diff 只能看见清单里写了什么，看不见路径背后是什么。
+            #    挂上它之后，预检才能：
+            #      · 发现 --model= 指向了不存在的路径（否则要等 rollout 900s
+            #        超时 + 服务全程 DOWN 才发现）
+            #      · 发现某个模型目录里的权重被【就地替换】了（路径没变，
+            #        kubectl diff 是空的，靠 sha256 指纹比对抓）
+            #    ⚠️ hostPathVolume 没有 readOnly 选项，所以是可写的 ——
+            #       但流水线只读它，不写。
+            - hostPathVolume:
+                hostPath: "/home/user/npc-models"
+                mountPath: "/home/user/npc-models"
+            - emptyDirVolume:
+                mountPath: "/home/jenkins/agent"
+            containers:
+            - name: "jnlp"
+              # ⭐ 1.1：在 1.0 基础上加了
+              #      RUN git config --system --add safe.directory '*'
+              #    为什么：agent 以 root(uid 0) 跑，而仓库 /srv/k3s-vllm-platform
+              #    属主是 uid 1000（WSL drvfs）→ git 报
+              #      fatal: detected dubious ownership in repository
+              #    → 流水线第一条 git 命令就死。1.0 上实测复现，1.1 上实测通过。
+              #    构建/自检脚本：_build-agent-1.1.sh + scripts/ci/agent/Dockerfile
+              image: "dsh/jenkins-agent:1.1"
+              alwaysPullImage: false
+              workingDir: "/home/jenkins/agent"
+              ttyEnabled: true
+              resourceRequestCpu: "500m"
+              resourceRequestMemory: "1Gi"
+              resourceLimitCpu: "4"
+              resourceLimitMemory: "4Gi"
+              envVars:
+              - envVar:
+                  key: TZ
+                  value: "Asia/Shanghai"
+
+      # ── ③ 关掉不需要的东西 ──
+      #     不禁用 CLI（有些脚本会用）
+      #     关掉统计上报
+      disabledAdministrativeMonitors:
+      - "hudson.diagnosis.ReverseProxySetupMonitor"

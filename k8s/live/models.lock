@@ -1,0 +1,56 @@
+{
+  "_comment": "模型权重指纹清单 —— 由 scripts/ci/check-models.py --write 生成",
+  "models_dir": "/home/user/npc-models",
+  "models": {
+    "Qwen3.5-2B-March7-cn": {
+      "config.json": {
+        "size": 9942,
+        "sha256": "66ed1b078f81a4f8437f142484bb1eed88b21f9509ac7fe904b0c5ab9f477b42"
+      },
+      "tokenizer.json": {
+        "size": 2495301,
+        "sha256": "ef01577f67622777707b447e0f877f10ce8d7850ac39f358038200f7bfb2caa2"
+      },
+      "generation_config.json": {
+        "size": 118,
+        "sha256": "a6916951b6796f8f8c7c1ad157b5897033150b54ff6a46be413271388e371173"
+      },
+      "chat_template.jinja": {
+        "size": 7755,
+        "sha256": "273d8e0e683b885071fb17e08d71e5f2a5ddfb5309756181681de4f5a1822d80"
+      },
+      "model.safetensors": {
+        "size": 1708723240,
+        "sha256": "9eb98eb492468bf5e162100a954afde45111a886fbdedd24e896d9e68908dbee"
+      },
+      "output_banned_ids.pt": {
+        "size": 5423,
+        "sha256": "3251fe63b631f408229afbf452b6d73136bac7991d320863efc2ff0133c53a69"
+      }
+    },
+    "dmeta-embedding-zh-small": {
+      "config.json": {
+        "size": 971,
+        "sha256": "1eb08ed191c01e8491bd8562b46682dc24351e6d4af0902140ccc6af8d5c3b3d"
+      },
+      "tokenizer.json": {
+        "size": 439378,
+        "sha256": "48cf244dcdc512e0299c6e9cef311636231b918a8b506b12738dbe4908429a04"
+      },
+      "model.safetensors": {
+        "size": 297252592,
+        "sha256": "695a26c1bdaef91c752b80824e3eaab79cc3713864259d7018c044548f655ee0"
+      }
+    },
+    "qwen3-asr-1.7b": {
+      "Qwen3-ASR-1.7B-Q4_K_M.gguf": {
+        "size": 1282435168,
+        "sha256": "aa747264a2fd4ad46a6024620dee3f93addb6f01053e41b88ea3d13e8887630b"
+      },
+      "mmproj-Qwen3-ASR-1.7B-Q4_K_M.gguf": {
+        "size": 221032992,
+        "sha256": "bb6f5fdbd3ee99be3746c9ea982eedbef31ce19c38ad0631a8edd445c5ae2d61"
+      }
+    }
+  }
+}

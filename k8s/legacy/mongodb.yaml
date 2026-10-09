@@ -1,0 +1,99 @@
+---
+# ══════════════════════════════════════════════════════════════
+#  MongoDB（standalone，供 vLLM 审计使用）
+#
+#  ⚠ 不要改回副本集：审计代理用 directConnection=true，Single 拓扑，
+#    不需要 replSet。要副本集的场景请另建独立的 StatefulSet + headless
+#    Service，并把成员 host 写成稳定的 pod DNS（mongodb-0.xxx），
+#    绝不能用普通 Service 名 / ClusterIP —— 理由见本文件头部注释。
+# ══════════════════════════════════════════════════════════════
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mongodb-data-pvc
+  namespace: default
+  labels: {app: mongodb, role: data}
+  annotations:
+    description: "MongoDB 数据（vLLM 审计）"
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path-retain
+  resources: {requests: {storage: 20Gi}}
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mongodb
+  namespace: default
+  labels: {app: mongodb}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: mongodb}
+  template:
+    metadata:
+      labels: {app: mongodb}
+    spec:
+      securityContext:
+        fsGroup: 999          # mongodb 用户
+      containers:
+      - name: mongodb
+        image: mongo:7.0
+        imagePullPolicy: IfNotPresent
+        # 直接 exec mongod：mongod 成为 PID 1，SIGTERM 天然正确转发。
+        # 不再有 bash entrypoint —— 上面列的 12 项缺陷里有 9 项都住在那个脚本里。
+        command: ["mongod"]
+        args:
+        - --bind_ip_all
+        - --dbpath
+        - /data/db
+        - --port
+        - "27017"
+        ports:
+        - {name: mongo, containerPort: 27017}
+        volumeMounts:
+        - {name: data, mountPath: /data/db}
+        resources:
+          requests: {cpu: "500m", memory: "1Gi"}
+          limits: {cpu: "2", memory: "4Gi"}
+        startupProbe:
+          exec:
+            command: ["mongosh", "--port", "27017", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          failureThreshold: 60
+        readinessProbe:
+          exec:
+            command: ["mongosh", "--port", "27017", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+          periodSeconds: 10
+          timeoutSeconds: 5
+        livenessProbe:
+          exec:
+            command: ["mongosh", "--port", "27017", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 5
+      volumes:
+      - name: data
+        persistentVolumeClaim: {claimName: mongodb-data-pvc}
+      terminationGracePeriodSeconds: 60
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongodb
+  namespace: default
+  labels: {app: mongodb}
+spec:
+  type: NodePort
+  selector: {app: mongodb}
+  ports:
+  - name: mongo
+    port: 27017
+    targetPort: 27017
+    nodePort: 30017
+    protocol: TCP

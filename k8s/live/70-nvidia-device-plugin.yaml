@@ -1,0 +1,155 @@
+# ══════════════════════════════════════════════════════════════
+#  70-nvidia-device-plugin.yaml —— NVIDIA device plugin（WSL 适配版）
+#
+#  ⭐ 为什么需要它：
+#    在此之前节点上 nvidia.com/gpu = 0（节点完全不认 GPU），于是 Deployment
+#    里没法声明 GPU 资源 —— 写了会让 Pod 永远 Pending。GPU 是靠
+#    Docker 的 default-runtime=nvidia 隐式注入 /dev/dxg 给所有容器的，
+#    k8s 层对 GPU 的存在一无所知：不能调度、不能计量、不能做准入控制。
+#    装上之后 nvidia.com/gpu 成为可调度资源，Deployment 就能显式申请。
+#
+#  ⭐ 为什么能装（前置条件实测都满足）：
+#    · k3s 用的是 cri-dockerd → dockerd，而 dockerd 的
+#      default-runtime 已经是 nvidia（nvidia-container-toolkit 已装，
+#      且对 WSL 有原生支持：它注入的就是 /dev/dxg + /usr/lib/wsl/lib）
+#    · NVML 在 WSL 上可用：/usr/lib/wsl/lib/libnvidia-ml.so.1 能枚举到
+#      RTX 5060，UUID=GPU-4058f132-6eda-eec6-98d3-8ef08bde432d
+#    · 镜像不带 NVML（依赖宿主），所以挂上 WSL 的 libs + LD_LIBRARY_PATH
+#      就能让它用 WSL 的 NVML 而不是标准 Linux 那套（后者需要 /dev/nvidia*）
+#
+#  ⚠️⚠️ 这里必须说清楚的边界（别指望它做不到的事）：
+#
+#    ① k8s 的 GPU 资源是【整数计数】，不是显存。
+#       nvidia.com/gpu: 1 = "我要一整块 GPU"，不存在"申请 2Gi 显存"这种写法。
+#       显存切分在 k8s 层【做不到】—— 那是 MIG（A100/H100 才有）的活，
+#       RTX 5060 不支持 MIG。显存仍然只能靠 vLLM 自己的
+#       --gpu-memory-utilization / --kv-cache-memory 来分。
+#
+#    ② 在 WSL 上它只是【声明式】的，不是强制隔离。
+#       因为 dockerd 的 default-runtime=nvidia 会给【每个】容器都注入
+#       /dev/dxg —— 不申请 nvidia.com/gpu 的 Pod 照样能用 GPU。
+#       所以它买到的是：调度准入（k8s 不让超过 N 个 GPU Pod 落地）+
+#       可见性（kubectl describe node / 谁占了 GPU 一目了然），
+#       不是"没申请就用不了"。
+#
+#    ③ 因此 timeSlicing.replicas 选多少是个【管理约定】，不是技术限制。
+#       这里选 2 —— 因为物理上就跑两个 GPU 服务（march7 + embed），
+#       而且显存只剩 ~900 MiB，加第三个会 OOM。想加服务时先看显存余量
+#       再改这个数（它不是显存配额，只是"允许多少个 Pod 声称要用 GPU"）。
+#
+#  ⚠️ 装了它之后，请求 nvidia.com/gpu 的 Pod 会被 device plugin 的
+#     Allocate 返回 NVIDIA_VISIBLE_DEVICES；实际注入仍由
+#     nvidia-container-runtime（dockerd 默认 runtime）完成。
+# ══════════════════════════════════════════════════════════════
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nvidia-device-plugin-config
+  namespace: kube-system
+  labels: {app: nvidia-device-plugin}
+data:
+  config.yaml: |
+    version: v1
+    flags:
+      # WSL 没有 MIG，明确关掉，免得插件去探测
+      migStrategy: none
+      # ⚠️ 默认 true —— WSL 上插件初始化可能要重试，设 false 让它阻塞重试
+      #    而不是 CrashLoopBackOff
+      failOnInitError: false
+    sharing:
+      # ⭐ time-slicing：把 1 块物理 GPU 虚拟成 N 个可调度单元。
+      #    这不是显存切分，只是"允许多少个 Pod 同时声称占用 GPU"。
+      #
+      # 2026-10-08 从 2 提到 4：原来选 2 是因为只有 march7 + embed 两个服务，
+      # 且显存只剩 ~900 MiB（加第三个会 OOM）。现在 march7 已缩到 0 副本，
+      # 显存腾出来给新模型（下一步是语音模型），留 4 个槽位方便扩展。
+      # ⚠️ 它【不是】显存配额 —— 槽位变多不会变出显存。加服务前仍然要看
+      #    nvidia-smi 的余量：这张卡只有 8151 MiB。
+      timeSlicing:
+        resources:
+          - name: nvidia.com/gpu
+            replicas: 4
+
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nvidia-device-plugin-daemonset
+  namespace: kube-system
+  labels: {app: nvidia-device-plugin}
+spec:
+  selector:
+    matchLabels: {name: nvidia-device-plugin-ds}
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels: {name: nvidia-device-plugin-ds}
+      annotations:
+        # ⭐⭐ 改上面的 ConfigMap（config.yaml）时必须把这个数字 +1。
+        #
+        #   为什么需要它：ConfigMap 是【文件挂载】，改了不会重建 pod，
+        #   而 device plugin 只在【启动时】读一次 config.yaml
+        #   → 改 replicas 不重启 = 配置不生效 = 「假成功」
+        #   （和 k8s/live/README.md 里记过的 vLLM ConfigMap 那个坑一模一样）
+        #
+        #   这个注解在 pod 模板里，改了它 → DaemonSet spec 变 → 自动滚动更新。
+        #   ⚠️ deploy.sh 的「CM 变了自动重启」逻辑只认【目标 Deployment 引用的 CM】，
+        #      这里的 CM 不属于 vllm-march7/vllm-embed，所以不会被自动处理。
+        #
+        #   历史：1 = replicas 2 ；2 = replicas 4（2026-10-08）
+        nvidia-device-plugin/config-version: "2"
+    spec:
+      priorityClassName: system-node-critical
+      tolerations:
+      # 标准做法：即使节点被标成"GPU 已占满"也要能调度上去
+      - key: nvidia.com/gpu
+        operator: Exists
+        effect: NoSchedule
+      containers:
+      - name: nvidia-device-plugin-ctr
+        image: nvcr.io/nvidia/k8s-device-plugin:v0.17.4
+        imagePullPolicy: IfNotPresent
+        securityContext:
+          # 需要写 kubelet 的 device-plugins 目录里的 socket
+          privileged: true
+        env:
+        # ⭐⭐ 关键：让插件加载 WSL 的 NVML（/usr/lib/wsl/lib），
+        #     而不是走标准 ld 路径找到 /usr/lib/x86_64-linux-gnu/ 下的
+        #     那份（那是 CUDA toolkit 带的，需要 /dev/nvidia* 才能工作）
+        - name: LD_LIBRARY_PATH
+          value: /usr/lib/wsl/lib
+        # WSL 上 XID 健康检查没有意义（没有 /proc/driver/nvidia）
+        - name: DP_DISABLE_HEALTHCHECKS
+          value: xids
+        args:
+          - --config-file=/config/config.yaml
+          # 默认 true 会直接退出，WSL 上给它重试的机会
+          - --fail-on-init-error=false
+        volumeMounts:
+        - name: device-plugin
+          mountPath: /var/lib/kubelet/device-plugins
+        - name: config
+          mountPath: /config
+        - name: wsl-lib
+          mountPath: /usr/lib/wsl/lib
+          readOnly: true
+        - name: dxg
+          mountPath: /dev/dxg
+        resources:
+          requests: {cpu: "50m", memory: "128Mi"}
+          limits: {cpu: "500m", memory: "512Mi"}
+      volumes:
+      - name: device-plugin
+        hostPath:
+          path: /var/lib/kubelet/device-plugins
+      - name: config
+        configMap:
+          name: nvidia-device-plugin-config
+      - name: wsl-lib
+        hostPath:
+          path: /usr/lib/wsl/lib
+      - name: dxg
+        hostPath:
+          path: /dev/dxg
+          type: CharDevice

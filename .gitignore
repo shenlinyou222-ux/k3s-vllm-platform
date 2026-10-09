@@ -1,0 +1,53 @@
+# CI 产物（Jenkins / 本地跑流水线会往这里写）
+/logs/
+
+# 状态 / 备份 / diff —— 回滚要用，但不是源码
+*-backup-*/
+/state/
+diff-*.txt
+dryrun-*.txt
+snapshot-*.json
+apply-*.txt
+cm-*.yaml
+*.bak-*
+# 注：bench-*.txt 不忽略 —— benchmarks/results/ 下那 8 份是刻意的性能证据
+benchmarks/results/bench-*.txt
+
+# 运行时缓存
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ⚠️ 凭据：绝对不要进仓库
+.env
+.env.*
+*secret*.yaml
+*secret*.yml
+k8s/jenkins/jenkins-secret.local.yaml
+*.key
+*.pem
+*credentials*
+*_rsa
+*_ed25519
+
+# 一次性脚本 / 本地调试产物
+_*.sh
+_*.py
+*.local.md
+
+# WSL IP 缓存（由 tools/sync_k3s_endpoint.py 生成，机器的 IP 不该进仓库）
+wsl-ip.txt
+
+# 模型权重（1-2GB，只留 models.lock 里的指纹）
+models/
+*.safetensors
+*.gguf
+*.bin
+output_banned_ids.pt

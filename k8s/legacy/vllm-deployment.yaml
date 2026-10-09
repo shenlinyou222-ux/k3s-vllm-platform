@@ -1,0 +1,383 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vllm-plugins
+  namespace: default
+data:
+  chinese_only.py: |
+    # SPDX-License-Identifier: Apache-2.0
+    """
+    ChineseOnlyLogitsProcessor —— 强制 mask 非中文字符的 logits
+    
+    原理：
+      · 启动时枚举词表，标记【解码后全由合法字符组成】的 token
+      · 每次前向时把非法 token 的 logits 设为 -inf
+      · 对所有请求全局生效
+    
+    合法字符：中文 / 中文标点 / 全角 / 数字 / 常用符号 / 空白
+    禁止：英文字母 / 阿拉伯文 / 韩文 / 日文假名 / emoji / 其他语言
+    """
+    import os, json, logging
+    
+    import torch
+    
+    from vllm.v1.sample.logits_processor.interface import BatchUpdate, LogitsProcessor
+    
+    logger = logging.getLogger("chinese_only_lp")
+    
+    # ══════════ 字符白名单 ══════════
+    ALLOW_RANGES = [
+        (0x0020, 0x007E),   # ASCII 可打印（后面会排除字母）
+        (0x2000, 0x206F),   # 常用标点
+        (0x2160, 0x217F),   # 罗马数字
+        (0x2460, 0x24FF),   # 带圈数字
+        (0x2605, 0x2606),   # ★☆
+        (0x3000, 0x303F),   # CJK 标点
+        (0x3400, 0x4DBF),   # CJK 扩展A
+        (0x4E00, 0x9FFF),   # CJK 统一表意
+        (0xF900, 0xFAFF),   # CJK 兼容
+        (0xFE30, 0xFE4F),   # CJK 兼容形式
+        (0xFF00, 0xFFEF),   # 全角
+        (0x00B7, 0x00B7),   # ·
+    ]
+    ALLOW_CHARS = set("，。！？、；：…—～·「」『』（）《》〈〉【】“”‘’ \n")
+    
+    # 排除的区间（优先级最高）
+    DENY_RANGES = [
+        (0x0041, 0x005A),   # A-Z
+        (0x0061, 0x007A),   # a-z
+        (0x0600, 0x06FF),   # 阿拉伯文
+        (0x0750, 0x077F),
+        (0x0400, 0x04FF),   # 西里尔文
+        (0x0500, 0x052F),
+        (0x0590, 0x05FF),   # 希伯来文
+        (0x0900, 0x097F),   # 天城文
+        (0x0E00, 0x0E7F),   # 泰文
+        (0x1100, 0x11FF),   # 韩文字母
+        (0x3040, 0x309F),   # 平假名
+        (0x30A0, 0x30FF),   # 片假名
+        (0xAC00, 0xD7AF),   # 韩文音节
+        (0x1F000, 0x1FAFF), # emoji / 符号
+        (0x1F300, 0x1F5FF),
+        (0x1F600, 0x1F64F),
+        (0x1F680, 0x1F6FF),
+        (0x1F900, 0x1F9FF),
+    ]
+    
+    def _is_denied(o):
+        for lo, hi in DENY_RANGES:
+            if lo <= o <= hi:
+                return True
+        return False
+    
+    def _is_allowed(o):
+        if o in (0x0A, 0x20):
+            return True
+        for lo, hi in ALLOW_RANGES:
+            if lo <= o <= hi:
+                return True
+        return False
+    
+    def _ok_char(ch):
+        o = ord(ch)
+        if ch in ALLOW_CHARS:
+            return True
+        if _is_denied(o):
+            return False
+        return _is_allowed(o)
+    
+    
+    class ChineseOnlyLogitsProcessor(LogitsProcessor):
+        """全局 mask：只允许中文字符集"""
+    
+        def __init__(self, vllm_config, device, is_pin_memory):
+            self.device = device
+            model_path = vllm_config.model_config.model
+            cache_path = "/cache/allowed_tokens.pt"
+    
+            allowed = None
+            if os.path.exists(cache_path):
+                try:
+                    allowed = torch.load(cache_path, map_location="cpu")
+                    logger.info("ChineseOnlyLP: loaded cache (%d allowed)", int(allowed.sum()))
+                except Exception as e:
+                    logger.warning("ChineseOnlyLP: cache load failed: %s", e)
+    
+            if allowed is None:
+                from transformers import AutoTokenizer
+                tok = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+                vocab = len(tok)
+                allowed = torch.zeros(vocab, dtype=torch.bool)
+                n_ok = 0
+                for tid in range(vocab):
+                    try:
+                        s = tok.decode([tid])
+                    except Exception:
+                        continue
+                    if not s:
+                        continue
+                    # 特殊 token 保留
+                    if s.startswith("<|") and s.endswith("|>"):
+                        allowed[tid] = True
+                        n_ok += 1
+                        continue
+                    if all(_ok_char(c) for c in s):
+                        allowed[tid] = True
+                        n_ok += 1
+                logger.info("ChineseOnlyLP: built mask %d/%d allowed", n_ok, vocab)
+                try:
+                    os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                    torch.save(allowed, cache_path)
+                except Exception as e:
+                    logger.warning("ChineseOnlyLP: cache save failed: %s", e)
+    
+            self.allowed = allowed.to(device)
+            self.banned = ~self.allowed
+            self.n_banned = int(self.banned.sum())
+            logger.info("ChineseOnlyLP: ready, banned=%d", self.n_banned)
+    
+        def apply(self, logits: torch.Tensor) -> torch.Tensor:
+            # logits: [num_reqs, model_vocab_size]（模型 vocab 可能大于 tokenizer vocab）
+            V = logits.shape[-1]
+            if self.banned.numel() < V:
+                # 超出 tokenizer 词表的部分（padding 位）→ 屏蔽
+                pad = torch.ones(V - self.banned.numel(), dtype=torch.bool,
+                                 device=logits.device)
+                banned = torch.cat([self.banned, pad])
+            elif self.banned.numel() > V:
+                banned = self.banned[:V]
+            else:
+                banned = self.banned
+            logits[..., banned] = float("-inf")
+            return logits
+    
+        def is_argmax_invariant(self) -> bool:
+            # 会改变 argmax（屏蔽了部分 token）
+            return False
+    
+        def update_state(self, batch_update: "BatchUpdate | None") -> None:
+            # 无状态
+            return None
+    
+  proxy.py: |
+    #!/usr/bin/env python3
+    """纯日志代理（不再注入 mask —— mask 在 vLLM 服务端）"""
+    import json, os, time, uuid, threading, re
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import urllib.request, urllib.error
+
+    TARGET = os.environ.get("TARGET", "http://127.0.0.1:8000")
+    LOG = os.environ.get("LOG_PATH", "/logs/requests.jsonl")
+    _lock = threading.Lock()
+    _n = {"i": 0}
+    _foreign = re.compile(r'[\u0600-\u06FF\u0400-\u04FF\uAC00-\uD7AF\u3040-\u30FF'
+                          r'\u0590-\u05FF\u0E00-\u0E7F\u0900-\u097F\u1F300-\u1FAFF]')
+
+    def log(rec):
+        with _lock:
+            try:
+                os.makedirs(os.path.dirname(LOG), exist_ok=True)
+                with open(LOG, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            except Exception:
+                pass
+
+    class H(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+        def log_message(self, *a): pass
+        def _p(self, method):
+            ln = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(ln) if ln else b""
+            rid = uuid.uuid4().hex[:12]
+            rj = None
+            if body:
+                try: rj = json.loads(body)
+                except Exception: pass
+            t0 = time.time()
+            hdrs = {k: v for k, v in self.headers.items()
+                    if k.lower() not in ("host", "content-length", "connection")}
+            hdrs["Content-Length"] = str(len(body))
+            req = urllib.request.Request(TARGET + self.path, data=body or None,
+                                         headers=hdrs, method=method)
+            try:
+                with urllib.request.urlopen(req, timeout=600) as r:
+                    rb, st, rh = r.read(), r.status, dict(r.headers)
+            except urllib.error.HTTPError as e:
+                rb, st, rh = e.read(), e.code, dict(e.headers)
+            except Exception as e:
+                rb, st, rh = json.dumps({"error": str(e)}).encode(), 502, {"Content-Type": "application/json"}
+            dt = round((time.time() - t0) * 1000)
+            try: rj2 = json.loads(rb)
+            except Exception: rj2 = None
+            if rj and "messages" in rj:
+                _n["i"] += 1
+                rec = {"seq": _n["i"], "rid": rid,
+                       "ts": time.strftime("%Y-%m-%d %H:%M:%S"), "ms": dt,
+                       "model": rj.get("model"), "temperature": rj.get("temperature"),
+                       "max_tokens": rj.get("max_tokens"), "n_messages": len(rj["messages"]),
+                       "messages": rj["messages"]}
+                if rj2 and "choices" in rj2:
+                    rep = rj2["choices"][0]["message"]["content"]
+                    rec["reply"] = rep
+                    rec["usage"] = rj2.get("usage")
+                    f = _foreign.findall(rep)
+                    if f:
+                        rec["foreign_chars"] = f
+                        print(f"[{rec['seq']:>4}] {rid} {dt:>5}ms ⚠️ {f}", flush=True)
+                    else:
+                        print(f"[{rec['seq']:>4}] {rid} {dt:>5}ms → {rep[:50]}", flush=True)
+                elif rj2 and "error" in rj2:
+                    rec["error"] = rj2["error"]
+                log(rec)
+            self.send_response(st)
+            for k, v in rh.items():
+                if k.lower() in ("content-length", "transfer-encoding", "connection"): continue
+                self.send_header(k, v)
+            self.send_header("Content-Length", str(len(rb)))
+            self.end_headers()
+            self.wfile.write(rb)
+        def do_POST(self): self._p("POST")
+        def do_GET(self): self._p("GET")
+
+    print(f"proxy: 0.0.0.0:8001 → {TARGET}", flush=True)
+    ThreadingHTTPServer(("0.0.0.0", 8001), H).serve_forever()
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-march7
+  namespace: default
+  labels:
+    app: vllm-march7
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: vllm-march7
+  template:
+    metadata:
+      labels:
+        app: vllm-march7
+    spec:
+      containers:
+      - name: vllm
+        image: vllm/vllm-openai@sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90
+        imagePullPolicy: IfNotPresent
+        command: ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+        args:
+          - "--model=/models/Qwen3.5-0.8B-March7-v4"
+          - "--served-model-name=march7v3"
+          - "--host=0.0.0.0"
+          - "--port=8000"
+          - "--gpu-memory-utilization=0.45"
+          - "--max-model-len=2048"
+          - "--max-num-seqs=64"
+          - "--trust-remote-code"
+          - "--enable-log-requests"
+          # ★ 服务端注册 logits processor（全局 mask）
+          - "--logits-processors"
+          - "chinese_only:ChineseOnlyLogitsProcessor"
+        ports:
+        - name: vllm
+          containerPort: 8000
+        env:
+        - name: VLLM_ATTENTION_BACKEND
+          value: "FLASH_ATTN"
+        - name: VLLM_USE_FLASHINFER_SAMPLER
+          value: "0"
+        - name: HF_HUB_OFFLINE
+          value: "1"
+        - name: TRANSFORMERS_OFFLINE
+          value: "1"
+        - name: PYTHONPATH
+          value: "/plugins"
+        volumeMounts:
+        - name: models
+          mountPath: /models
+          readOnly: true
+        - name: plugins
+          mountPath: /plugins
+          readOnly: true
+        - name: cache
+          mountPath: /cache
+        - name: hfcache
+          mountPath: /root/.cache
+        resources:
+          requests: {cpu: "2", memory: "4Gi"}
+          limits: {cpu: "8", memory: "12Gi"}
+        startupProbe:
+          httpGet: {path: /health, port: 8000}
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          failureThreshold: 90
+        readinessProbe:
+          httpGet: {path: /health, port: 8000}
+          periodSeconds: 10
+          timeoutSeconds: 5
+
+      - name: log-proxy
+        image: vllm/vllm-openai@sha256:8a69ffad015f138d7170c4ddc429e230a3bc1c1719f67e14324749df200a4b90
+        imagePullPolicy: IfNotPresent
+        command: ["python3", "/plugins/proxy.py"]
+        ports:
+        - name: proxy
+          containerPort: 8001
+        env:
+        - name: TARGET
+          value: "http://127.0.0.1:8000"
+        - name: LOG_PATH
+          value: "/logs/requests.jsonl"
+        volumeMounts:
+        - name: plugins
+          mountPath: /plugins
+          readOnly: true
+        - name: logs
+          mountPath: /logs
+        resources:
+          requests: {cpu: "100m", memory: "128Mi"}
+          limits: {cpu: "1", memory: "512Mi"}
+        readinessProbe:
+          tcpSocket: {port: 8001}
+          initialDelaySeconds: 5
+          periodSeconds: 10
+
+      volumes:
+      - name: models
+        hostPath: {path: /home/user/npc-models, type: Directory}
+      - name: plugins
+        configMap: {name: vllm-plugins}
+      - name: cache
+        hostPath: {path: /home/user/npc-models/mask, type: DirectoryOrCreate}
+      - name: hfcache
+        emptyDir: {}
+      - name: logs
+        emptyDir: {}
+      terminationGracePeriodSeconds: 30
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-march7
+  namespace: default
+  labels:
+    app: vllm-march7
+spec:
+  type: NodePort
+  selector:
+    app: vllm-march7
+  ports:
+  - name: proxy
+    port: 8001
+    targetPort: 8001
+    nodePort: 30800
+    protocol: TCP
+  - name: vllm-direct
+    port: 8000
+    targetPort: 8000
+    nodePort: 30801
+    protocol: TCP
