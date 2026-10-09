@@ -1,7 +1,7 @@
 # k3s-vLLM-platform
 
 > 单节点 k3s GPU 推理平台的 **CI/CD + 可观测性** 工程。
-> 不是"我在 k3s 里跑了 vLLM"这种教程级 demo —— 真正的东西在 `ci/scripts/`：
+> 不是「在 k3s 里跑通 vLLM」这种教程级 demo —— 真正的东西在 `ci/scripts/`：
 > **一套把「发布到底生效了没有」变成可执行判据的验证工程。**
 
 ---
