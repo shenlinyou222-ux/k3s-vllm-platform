@@ -1,4 +1,4 @@
-﻿#!/bin/bash
+#!/bin/bash
 # deploy-vllm.sh —— 部署 vLLM 到 k3s
 export PATH="/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:$PATH"
 

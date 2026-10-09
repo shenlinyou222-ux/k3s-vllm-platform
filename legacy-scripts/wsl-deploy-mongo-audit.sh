@@ -1,4 +1,4 @@
-﻿#!/bin/bash
+#!/bin/bash
 # deploy-mongo-audit.sh —— 部署 vLLM + MongoDB 审计
 export PATH="/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:$PATH"
 

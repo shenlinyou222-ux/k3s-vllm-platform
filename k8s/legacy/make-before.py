@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """make-before.py —— 从【已改】的 manifest 反向推出【改前】版本
 

@@ -1,4 +1,4 @@
-﻿#!/bin/bash
+#!/bin/bash
 # redeploy-vllm.sh —— 用 digest 重新部署
 export PATH="/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin:$PATH"
 

@@ -171,12 +171,40 @@ k3s-vllm-platform/
 ├── ci/
 │   ├── Jenkinsfile               声明式流水线（只编排，不实现判据）
 │   ├── agent/Dockerfile          Jenkins Agent 镜像
-│   └── scripts/                  ⭐ 14 个脚本 —— 这套系统的本体
+│   └── scripts/                  ⭐ 15 个脚本 + 1 份 README —— 这套系统的本体
+│                                    （4 个 shell 阶段 + 3 个辅助 shell
+│                                     + 1 个 Jenkinsfile 辅助 + 6 个 python
+│                                     + 1 个参考数据 json）
 ├── benchmarks/results/           8 份 CI 性能产物 + A/B 纪律说明
-├── dashboards/                   4 个 Grafana dashboard JSON（可直接 Import）
+├── dashboards/                   4 个 Grafana dashboard JSON + 说明（可直接 Import）
 ├── tools/                        sync_k3s_endpoint.py + k3s-endpoints.json
 └── legacy-scripts/               早期 wsl-*.sh（已被 CI 取代，作历史）
 ```
+
+---
+
+## ⚠️ 与原工作仓库的**目录差异**（读文件时请注意）
+
+本仓库按「这条线」重组了目录，所以原仓库里的路径在这里**不一样**：
+
+| 原工作仓库 | 本仓库 | 说明 |
+|---|---|---|
+| `scripts/ci/` | **`ci/scripts/`** | 脚本挪到 `ci/` 下，和 Jenkinsfile、agent 镜像放一起 |
+| `Jenkinsfile`（根目录） | **`ci/Jenkinsfile`** | Jenkins Job 的 Script Path 要相应改成 `ci/Jenkinsfile` |
+| `k8s/README-jenkins.md` | **`k8s/jenkins/README-jenkins.md`** | Jenkins 相关清单收进 `k8s/jenkins/` |
+| `k8s/jenkins*.yaml` | **`k8s/jenkins/jenkins*.yaml`** | 同上 |
+| `logs/ci/bench-*.txt` | **`benchmarks/results/`** | 只搬了性能产物 |
+| Pod 里的 `logs/ci/` 产物目录 | 不变 | 那是**运行时**产物，由 `CI_ARTIFACT_DIR` 决定 |
+
+**脚本内部因此有两类路径是对的**，不要误改成同一个：
+
+| 变量 | 值 | 为什么 |
+|---|---|---|
+| `CI_DIR` / `REPO` | `ci/scripts` 的父父目录 = 仓库根 | `lib.sh` 用 `BASH_SOURCE` **自己定位**，两种布局都对 |
+| `CI_ARTIFACT_DIR` | 由 Jenkinsfile 显式传（宿主路径） | agent 的 workspace 是 emptyDir，会被 `cleanWs()` 清掉 |
+
+> 唯一需要手工同步的是 **Jenkins Job 的 Script Path** —— 它存在 Jenkins 的 job 配置里，
+> 不在仓库里。见 [`k8s/jenkins/README-jenkins.md`](k8s/jenkins/README-jenkins.md) 第五节。
 
 ---
 
@@ -186,10 +214,17 @@ k3s-vllm-platform/
 
 - 明文凭据 → 占位符（`REPLACE_ME_...`）+ 说明该走 Secret 注入
 - 内网 IP / 个人宿主路径 / 项目代号 → 通用占位符（`<WSL-IP>`、`/srv/...`）
-- `logs/ci/` 里的 diff / snapshot / live-backup **没有搬**（可能含内部信息），
+- `logs/ci/` 里的 diff / snapshot / live-backup / apply **没有搬**（可能含内部信息），
   只搬了 `bench-*.txt` 作为性能证据
 
 细节见 [docs/06-limitations.md](docs/06-limitations.md) 末尾与各文件内的 `脱敏说明` 注释。
+
+> 自查命令：
+> ```bash
+> git grep -i -nE 'password|passwd|token|secret|api[_-]?key'
+> ```
+> 剩下的匹配应该全部是**占位符、字段名（`tokenizer.json` / `max_tokens`）、
+> 或"该走 Secret 注入"之类的说明文字** —— 逐条核过的结果见 docs/06。
 
 ---
 

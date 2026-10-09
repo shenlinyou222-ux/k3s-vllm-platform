@@ -1,4 +1,4 @@
-﻿# Jenkins CI/CD —— 部署与使用
+# Jenkins CI/CD —— 部署与使用
 
 > 目标：**改代码 → 自动构建 → 自动部署 → 自动验证 → 失败自动回滚**
 > 账号**脚本化创建**，不用人工注册。
@@ -156,7 +156,7 @@ Job 的关键配置（`vllm-platform-deploy`）：
 |---|---|
 | SCM url | `file:///srv/k3s-vllm-platform.git`（裸仓库 = git origin） |
 | 分支 | `*/main` |
-| Script Path | `Jenkinsfile` |
+| Script Path | `ci/Jenkinsfile`（⚠️ 本抽取仓库把它放在 `ci/` 下；原工作仓库在根目录） |
 | 触发器 | `pollSCM`（Jenkinsfile 里声明，每 2 分钟） |
 | 挂载 | 裸仓库必须同时挂给 **Controller 和 agent** —— `checkout scm` 是在 agent pod 里执行的 |
 

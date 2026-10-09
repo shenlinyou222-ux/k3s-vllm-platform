@@ -1,4 +1,4 @@
-﻿---
+---
 # ══════════════════════════════════════════════════════════════
 #  k8s/jenkins-casc.yaml —— Jenkins Configuration as Code (JCasC)
 #
@@ -18,7 +18,7 @@ metadata:
 data:
   casc.yaml: |
     jenkins:
-      systemMessage: "k3s-vllm-platform CI/CD —— 流水线脚本在 scripts/ci/，用法见 README"
+      systemMessage: "k3s-vllm-platform CI/CD —— 流水线脚本在 ci/scripts/，用法见 README"
 
       # ── ① 账号：脚本化创建，不用人工注册 ──
       securityRealm:

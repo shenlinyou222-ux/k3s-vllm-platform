@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 sync_k3s_endpoint.py —— 把 k3s 服务端点同步到各应用配置
