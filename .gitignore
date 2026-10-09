@@ -1,53 +1,73 @@
-# CI 产物（Jenkins / 本地跑流水线会往这里写）
-/logs/
+# ══════════════════════════════════════════════════════════════
+#  注意：这个 .gitignore 有一条原则 ——
+#  「刻意的产物」不要用通配符批量忽略，否则连该进仓库的证据一起漏掉。
+#  历史上就踩过两次：benchmarks/results/bench-*.txt（性能证据）
+#  和 k8s/jenkins/jenkins-secret.yaml（模板）都被误伤了。
+# ══════════════════════════════════════════════════════════════
 
-# 状态 / 备份 / diff —— 回滚要用，但不是源码
-*-backup-*/
+# ── CI 产物（跑流水线时才会出现；仓库里本来没有）──
+# 只忽略仓库根下的 logs/，不影响任何已提交的 benchmarks/dashboards 等
+/logs/
+/ci-artifacts/
+
+# 回滚要用的状态 / 备份 / diff —— 不是源码
 /state/
+*-backup-*/
 diff-*.txt
 dryrun-*.txt
 snapshot-*.json
 apply-*.txt
-cm-*.yaml
+cm-*-*.yaml
 *.bak-*
-# 注：bench-*.txt 不忽略 —— benchmarks/results/ 下那 8 份是刻意的性能证据
-benchmarks/results/bench-*.txt
 
-# 运行时缓存
+# ⚠️ bench-*.txt 【故意不忽略】——
+#    benchmarks/results/ 下那 8 份是这套流水线性能层判据的原始证据，
+#    是仓库的一部分，不是"跑出来的垃圾"。
+
+# ── 运行时缓存 ──
 __pycache__/
 *.py[cod]
 .venv/
 venv/
 
-# 编辑器 / 系统
+# ── 编辑器 / 系统 ──
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
 
-# ⚠️ 凭据：绝对不要进仓库
+# ══════════════════════════════════════════════════════════════
+#  ⚠️ 凭据：绝对不要进仓库
+#
+#  这里【不写】 `*secret*.yaml` 这种宽通配 —— 因为它会把
+#  k8s/jenkins/jenkins-secret.yaml（一个只有占位符的模板，应该进仓库）
+#  一起挡掉。改成列出具体的"真值文件名"。
+#
+#  规则：仓库里可以有一个【模板】，真值放在模板之外的文件/环境里。
+# ══════════════════════════════════════════════════════════════
 .env
 .env.*
-*secret*.yaml
-*secret*.yml
 k8s/jenkins/jenkins-secret.local.yaml
+k8s/jenkins/jenkins-secret.values.yaml
+k8s/**/*.sealed.local.yaml
 *.key
 *.pem
-*credentials*
+*credentials*.json
+*credentials*.yaml
+*credentials*.yml
 *_rsa
 *_ed25519
 
-# 一次性脚本 / 本地调试产物
+# ── 一次性脚本 / 本地调试产物 ──
 _*.sh
 _*.py
 *.local.md
 
-# WSL IP 缓存（由 tools/sync_k3s_endpoint.py 生成，机器的 IP 不该进仓库）
+# ── WSL IP 缓存（tools/sync_k3s_endpoint.py 生成；机器 IP 不进仓库）──
 wsl-ip.txt
 
-# 模型权重（1-2GB，只留 models.lock 里的指纹）
-models/
+# ── 模型权重（1-2GB）——只留 models.lock 里的 sha256 指纹 ──
+/models/
 *.safetensors
 *.gguf
-*.bin
 output_banned_ids.pt

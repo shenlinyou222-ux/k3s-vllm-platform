@@ -1,0 +1,20 @@
+   端点: http://vllm-march7.default.svc.cluster.local:8001/v1/chat/completions
+   ── 预热 3 次（不计入）──
+      预热1:  64 tok /  0.45s =  141.1 tok/s
+      预热2:  64 tok /  0.44s =  145.4 tok/s
+      预热3:  64 tok / -0.66s =  -96.7 tok/s
+   ── 正式 10 次 ──
+      第 1次:  64 tok /  0.45s =  141.3 tok/s
+      第 2次:  64 tok /  0.45s =  143.6 tok/s
+      第 3次:  64 tok /  0.43s =  148.8 tok/s
+      第 4次:  64 tok /  0.44s =  145.4 tok/s
+      第 5次:  64 tok /  0.47s =  135.7 tok/s
+      第 6次:  64 tok /  0.49s =  131.6 tok/s
+      第 7次:  64 tok /  0.46s =  139.5 tok/s
+      第 8次:  64 tok /  0.44s =  144.0 tok/s
+      第 9次:  64 tok /  0.46s =  140.4 tok/s
+      第10次:  64 tok /  0.43s =  147.6 tok/s
+
+   平均 tok/s  = 141.8
+   中位数      = 142.5
+   最快/最慢   = 148.8 / 131.6
