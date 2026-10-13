@@ -1,0 +1,39 @@
+---
+# ══════════════════════════════════════════════════════════════════════
+#  role: common —— 基础包与主机前置条件
+# ══════════════════════════════════════════════════════════════════════
+- name: 更新 apt 缓存
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+  register: apt_update
+  retries: 3
+  delay: 5
+  until: apt_update is succeeded
+
+- name: 安装基础包
+  ansible.builtin.apt:
+    name: "{{ base_packages }}"
+    state: present
+  # nvidia-utils 在 WSL2 下可能装不上（驱动由 Windows 侧提供），允许失败
+  failed_when: false
+  register: pkg_result
+
+- name: 报告装包结果
+  ansible.builtin.debug:
+    msg: >-
+      apt 安装{{ pkg_result is changed | ternary('有变更', '无变更') }};
+      {{ pkg_result.failed | default(false) | ternary('部分包失败（WSL2 下 nvidia-utils 属正常）', '全部成功') }}
+
+- name: 确保 ~/.local/bin 存在
+  ansible.builtin.file:
+    path: "{{ helm_install_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: 确保 ~/.local/bin 在 PATH 里（写进 .bashrc，幂等）
+  ansible.builtin.lineinfile:
+    path: "{{ ansible_env.HOME }}/.bashrc"
+    line: 'export PATH="$HOME/.local/bin:$PATH"'
+    state: present
+    create: true

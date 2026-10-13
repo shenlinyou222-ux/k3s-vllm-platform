@@ -1,0 +1,45 @@
+# ══════════════════════════════════════════════════════════════════════
+#  ansible/group_vars/all.yml —— 全局变量
+# ══════════════════════════════════════════════════════════════════════
+
+# ── 主机 ──────────────────────────────────────────────────────────────
+# 基础包（WSL2 Ubuntu 上装 k3s 与运维所需）
+base_packages:
+  - curl
+  - ca-certificates
+  - gnupg
+  - git
+  - jq
+  - python3
+  - python3-pip
+  - nvidia-utils-550   # nvidia-smi，WSL2 下由 Windows 驱动提供
+
+# ── WSL2 GPU 直通 ─────────────────────────────────────────────────────
+# 这三个是 WSL2 跑 GPU 容器的前提，缺一个 k8s 就看不到 GPU
+wsl_gpu_paths:
+  - /dev/dxg
+  - /usr/lib/wsl/lib/libcuda.so.1
+  - /usr/lib/wsl/lib/libnvidia-ml.so.1
+
+# ── k3s ───────────────────────────────────────────────────────────────
+k3s_version: "v1.36.4+k3s1"
+k3s_install_url: "https://get.k3s.io"
+# ⚠️ 单节点默认带 traefik + servicelb，会和已有 NodePort 抢端口，所以关掉
+k3s_disable:
+  - traefik
+  - servicelb
+k3s_kubeconfig_src: /etc/rancher/k3s/k3s.yaml
+k3s_kubeconfig_dst: "{{ ansible_env.HOME }}/.kube/config"
+
+# ── 模型仓 ────────────────────────────────────────────────────────────
+models_host_path: /home/user/npc-models
+models_owner: user
+models_group: user
+# models.lock 里记录的权重指纹（由 scripts/ci/check-models.py 生成）
+models_lock_relpath: k8s/live/models.lock
+# 是否在 playbook 里跑一次指纹校验（会读所有模型文件，慢；默认关）
+models_verify_checksums: false
+
+# ── Helm ──────────────────────────────────────────────────────────────
+helm_version: "v3.16.4"
+helm_install_dir: "{{ ansible_env.HOME }}/.local/bin"

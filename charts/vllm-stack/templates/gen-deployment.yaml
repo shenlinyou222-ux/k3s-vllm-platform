@@ -1,0 +1,131 @@
+{{- if .Values.gen.enabled }}
+{{- $ns := include "vllm-stack.namespace" . }}
+# ══════════════════════════════════════════════════════════════════════
+#  生成式 LLM —— {{ .Values.gen.name }}
+#  等价于 k8s/live/10-vllm-mongo.yaml 里的 vllm-march7 Deployment
+# ══════════════════════════════════════════════════════════════════════
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.gen.name }}
+  namespace: {{ $ns }}
+  labels:
+    app: {{ .Values.gen.name }}
+    {{- include "vllm-stack.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.gen.replicas }}
+  # 单副本 + Recreate：两个 pod 会抢同一块 GPU
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: {{ .Values.gen.name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.gen.name }}
+      annotations:
+        # 模型名变了就滚动重建（否则改了 values 但 pod 不重启 → 「假成功」）
+        checksum/model: {{ .Values.gen.model | sha256sum }}
+        checksum/gencfg: {{ .Values.config.gencfgBody | default "" | sha256sum }}
+    spec:
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: vllm
+          image: {{ include "vllm-stack.vllmImage" . }}
+          imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          command: ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+          args:
+            - "--model={{ .Values.gen.model }}"
+            - "--served-model-name={{ .Values.gen.servedModelName }}"
+            - "--host=0.0.0.0"
+            - "--port=8000"
+            - "--kv-cache-memory={{ .Values.gen.kvCacheMemory }}"
+            - "--gpu-memory-utilization={{ .Values.gen.gpuMemoryUtilization }}"
+            - "--max-model-len={{ .Values.gen.maxModelLen }}"
+            - "--max-num-seqs={{ .Values.gen.maxNumSeqs }}"
+            {{- if .Values.gen.trustRemoteCode }}
+            - "--trust-remote-code"
+            {{- end }}
+            {{- if .Values.gen.enableLogRequests }}
+            - "--enable-log-requests"
+            {{- end }}
+            {{- if .Values.gen.enableLogOutputs }}
+            - "--enable-log-outputs"
+            {{- end }}
+            - "--log-config-file=/logcfg/uvicorn.json"
+            - "--generation-config={{ .Values.gen.generationConfigMount }}"
+          ports:
+            - name: vllm
+              containerPort: 8000
+            - name: metrics
+              containerPort: {{ .Values.gen.service.metricsPort }}
+          env:
+            {{- include "vllm-stack.commonEnv" . | nindent 12 }}
+          volumeMounts:
+            - name: models
+              mountPath: /models
+              readOnly: true
+            - name: hfcache
+              mountPath: /root/.cache
+            - name: uvicorn-logcfg
+              mountPath: /logcfg
+              readOnly: true
+            - name: gencfg
+              mountPath: {{ .Values.gen.generationConfigMount }}
+              readOnly: true
+          resources:
+            {{- toYaml .Values.gen.resources | nindent 12 }}
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: {{ .Values.gen.probes.startup.initialDelaySeconds }}
+            periodSeconds: {{ .Values.gen.probes.startup.periodSeconds }}
+            failureThreshold: {{ .Values.gen.probes.startup.failureThreshold }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: {{ .Values.gen.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.gen.probes.readiness.timeoutSeconds }}
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: {{ .Values.storage.claimName }}
+            readOnly: true
+        - name: hfcache
+          emptyDir: {}
+        - name: uvicorn-logcfg
+          configMap:
+            name: vllm-uvicorn-logcfg
+        - name: gencfg
+          configMap:
+            name: vllm-gencfg
+      terminationGracePeriodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.gen.name }}
+  namespace: {{ $ns }}
+  labels:
+    app: {{ .Values.gen.name }}
+    {{- include "vllm-stack.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.gen.service.type }}
+  selector:
+    app: {{ .Values.gen.name }}
+  ports:
+    - name: vllm-direct
+      port: {{ .Values.gen.service.port }}
+      targetPort: 8000
+      nodePort: {{ .Values.gen.service.nodePort }}
+      protocol: TCP
+    - name: metrics
+      port: {{ .Values.gen.service.metricsPort }}
+      targetPort: {{ .Values.gen.service.metricsPort }}
+      nodePort: {{ .Values.gen.service.metricsNodePort }}
+      protocol: TCP
+{{- end }}

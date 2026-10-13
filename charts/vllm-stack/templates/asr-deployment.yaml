@@ -1,0 +1,84 @@
+{{- if .Values.asr.enabled }}
+{{- $ns := include "vllm-stack.namespace" . }}
+# ══════════════════════════════════════════════════════════════════════
+#  ASR —— {{ .Values.asr.name }}（llama.cpp server，走 CPU 不占显存）
+#  等价于 k8s/live/80-llama-asr.yaml
+# ══════════════════════════════════════════════════════════════════════
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.asr.name }}
+  namespace: {{ $ns }}
+  labels:
+    app: {{ .Values.asr.name }}
+    {{- include "vllm-stack.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.asr.replicas }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: {{ .Values.asr.name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.asr.name }}
+    spec:
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: llama
+          image: "{{ .Values.asr.image.repository }}:{{ .Values.asr.image.tag }}"
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--model"
+            - "{{ .Values.asr.model }}"
+            - "--mmproj"
+            - "{{ .Values.asr.mmproj }}"
+            - "--host"
+            - "0.0.0.0"
+            - "--port"
+            - "8000"
+            {{- if .Values.asr.noWebui }}
+            - "--no-webui"
+            {{- end }}
+          ports:
+            - name: http
+              containerPort: 8000
+          volumeMounts:
+            - name: models
+              mountPath: /models
+              readOnly: true
+          resources:
+            {{- toYaml .Values.asr.resources | nindent 12 }}
+          readinessProbe:
+            tcpSocket:
+              port: 8000
+            periodSeconds: 10
+            timeoutSeconds: 5
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: {{ .Values.storage.claimName }}
+            readOnly: true
+      terminationGracePeriodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.asr.name }}
+  namespace: {{ $ns }}
+  labels:
+    app: {{ .Values.asr.name }}
+    {{- include "vllm-stack.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.asr.service.type }}
+  selector:
+    app: {{ .Values.asr.name }}
+  ports:
+    - name: http
+      port: {{ .Values.asr.service.port }}
+      targetPort: 8000
+      nodePort: {{ .Values.asr.service.nodePort }}
+      protocol: TCP
+{{- end }}

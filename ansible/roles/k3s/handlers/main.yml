@@ -1,0 +1,5 @@
+---
+# k3s role 的 handler
+- name: reload kubeconfig note
+  ansible.builtin.debug:
+    msg: "kubeconfig 已更新到 {{ k3s_kubeconfig_dst }}（Terraform/Helm 读这个）"

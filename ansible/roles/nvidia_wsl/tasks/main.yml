@@ -1,0 +1,53 @@
+---
+# ══════════════════════════════════════════════════════════════════════
+#  role: nvidia_wsl —— WSL2 GPU 直通检查
+#
+#  为什么单独成 role：
+#    WSL2 的 GPU 暴露方式和原生 Linux 完全不同 —— 没有 /dev/nvidia0，
+#    而是 /dev/dxg + /usr/lib/wsl/lib 下的 Windows 驱动库。k8s 侧完全看不到
+#    这些，所以 device plugin 的 YAML 里必须手工挂进去（见 chart 的
+#    templates/device-plugin.yaml）。这个 role 负责在主机侧确认前提成立。
+# ══════════════════════════════════════════════════════════════════════
+
+- name: 检查 WSL2 GPU 直通路径是否存在
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop: "{{ wsl_gpu_paths }}"
+  register: gpu_paths_stat
+
+- name: 汇总 GPU 直通检查结果
+  ansible.builtin.set_fact:
+    gpu_missing: "{{ gpu_paths_stat.results | selectattr('stat.exists', 'equalto', false) | map(attribute='item') | list }}"
+    gpu_passthrough_ok: "{{ gpu_paths_stat.results | selectattr('stat.exists', 'equalto', false) | list | length == 0 }}"
+
+- name: GPU 直通检查
+  ansible.builtin.debug:
+    msg: >-
+      {{ gpu_passthrough_ok | ternary('✅ 全部存在', '❌ 缺失: ' ~ (gpu_missing | join(', '))) }}
+
+- name: 直通异常时给出排查指引（不中断，只警告）
+  ansible.builtin.debug:
+    msg:
+      - "⚠️ GPU 直通不完整，k8s 里 nvidia.com/gpu 会一直是 0。"
+      - "排查顺序："
+      - "  1) Windows 侧驱动是否支持 WSL（nvidia-smi.exe 在 Windows 能跑吗）"
+      - "  2) wsl --update 是否最新（老版本没有 /dev/dxg）"
+      - "  3) /usr/lib/wsl/lib 是否被误删（重装 WSL 会重建）"
+  when: not gpu_passthrough_ok
+
+- name: nvidia-smi 能否在 WSL 内执行
+  ansible.builtin.command: nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+  register: smi
+  changed_when: false
+  failed_when: false
+
+- name: 报告 GPU 信息
+  ansible.builtin.debug:
+    msg: "nvidia-smi: {{ smi.stdout | default('不可用') }}"
+
+- name: 确保 /usr/lib/wsl/lib 可被容器读取（device plugin 要挂它）
+  ansible.builtin.file:
+    path: /usr/lib/wsl/lib
+    state: directory
+    mode: "0755"
+  when: gpu_passthrough_ok

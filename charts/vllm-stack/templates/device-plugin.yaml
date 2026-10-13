@@ -1,0 +1,91 @@
+{{- if .Values.devicePlugin.enabled }}
+{{- $ns := include "vllm-stack.namespace" . }}
+# ══════════════════════════════════════════════════════════════════════
+#  NVIDIA device plugin（WSL2 适配版）
+#  等价于 k8s/live/70-nvidia-device-plugin.yaml
+#
+#  作用：把宿主机的 GPU 暴露成 k8s 可调度的扩展资源 nvidia.com/gpu。
+#  没有它，Pod 里写 nvidia.com/gpu: 1 会被调度器判为「节点资源不足」。
+#
+#  ⚠️ WSL2 三个适配点（缺一个就起不来）：
+#     ① 挂 /dev/dxg（WSL 的 GPU 直通设备，不是 /dev/nvidia*）
+#     ② 挂 /usr/lib/wsl/lib（WSL 的 CUDA 驱动库所在）
+#     ③ --fail-on-init-error=false（WSL 下 nvml 初始化会报错但实际可用）
+# ══════════════════════════════════════════════════════════════════════
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nvidia-device-plugin-daemonset
+  namespace: kube-system
+  labels:
+    {{- include "vllm-stack.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      name: nvidia-device-plugin-ds
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        name: nvidia-device-plugin-ds
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: {{ .Values.devicePlugin.nodeName | default "" | quote }}
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
+      priorityClassName: system-node-critical
+      containers:
+        - name: nvidia-device-plugin-ctr
+          image: "{{ .Values.devicePlugin.image.repository }}:{{ .Values.devicePlugin.image.tag }}"
+          args:
+            {{- if not .Values.devicePlugin.failOnInitError }}
+            - "--fail-on-init-error=false"
+            {{- end }}
+            - "--mig-strategy={{ .Values.devicePlugin.migStrategy }}"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: device-plugin
+              mountPath: /var/lib/kubelet/device-plugins
+            # ⚠️ WSL2 适配 ①
+            - name: dxg
+              mountPath: /dev/dxg
+            # ⚠️ WSL2 适配 ②
+            - name: wsl-lib
+              mountPath: /usr/lib/wsl
+      volumes:
+        - name: device-plugin
+          hostPath:
+            path: /var/lib/kubelet/device-plugins
+        - name: dxg
+          hostPath:
+            path: /dev/dxg
+        - name: wsl-lib
+          hostPath:
+            path: /usr/lib/wsl
+---
+# ── timeSlicing：让单卡 advertise 成多份 ──────────────────────────────
+# 原集群实测 nvidia.com/gpu 由 0 → 4，就是靠这份 ConfigMap。
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nvidia-device-plugin-config
+  namespace: kube-system
+  labels:
+    {{- include "vllm-stack.labels" . | nindent 4 }}
+data:
+  config: |
+    version: v1
+    flags:
+      migStrategy: {{ .Values.devicePlugin.migStrategy }}
+    sharing:
+      timeSlicing:
+        resources:
+          - name: nvidia.com/gpu
+            replicas: {{ .Values.devicePlugin.timeSlicingReplicas }}
+{{- end }}

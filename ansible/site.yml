@@ -1,0 +1,43 @@
+# ══════════════════════════════════════════════════════════════════════
+#  ansible/site.yml —— 主机层配置管理
+#
+#  职责边界（面试会问「为什么用 Ansible 而不是全交给 Helm」）：
+#    · Helm/Terraform 管**集群内**的声明式资源（Deployment/PV/Service）
+#    · Ansible 管**主机上**的东西 —— 装包、写文件、装 k3s、校验 GPU 直通。
+#      这些东西不在 k8s API 里，Helm 看不到也管不了。
+#
+#  幂等性：所有 task 都用幂等模块（package/file/template），可重复执行。
+# ══════════════════════════════════════════════════════════════════════
+---
+- name: 准备 k3s GPU 推理主机
+  hosts: vllm_hosts
+  become: true
+  gather_facts: true
+
+  pre_tasks:
+    - name: 显示目标主机信息
+      ansible.builtin.debug:
+        msg: >-
+          主机 {{ inventory_hostname }} ·
+          {{ ansible_distribution }} {{ ansible_distribution_version }} ·
+          内核 {{ ansible_kernel }} ·
+          {{ ansible_processor_vcpus }} vCPU / {{ (ansible_memtotal_mb / 1024) | round(1) }} GiB
+
+  roles:
+    - role: common
+      tags: [common, base]
+    - role: nvidia_wsl
+      tags: [nvidia, gpu]
+    - role: k3s
+      tags: [k3s, cluster]
+    - role: vllm_host
+      tags: [models, host]
+
+  post_tasks:
+    - name: 汇总
+      ansible.builtin.debug:
+        msg:
+          - "k3s:        {{ k3s_installed | default(false) | ternary('已就绪', '未安装') }}"
+          - "GPU 直通:   {{ gpu_passthrough_ok | default(false) | ternary('正常', '异常') }}"
+          - "模型目录:   {{ models_host_path }}"
+          - "模型文件数: {{ model_file_count | default('未统计') }}"

@@ -1,0 +1,48 @@
+vllm-stack 已部署 ✅
+
+Release:  {{ .Release.Name }}
+Namespace: {{ include "vllm-stack.namespace" . }}
+
+── 服务入口（NodePort）──────────────────────────────────────────────
+{{- if .Values.gen.enabled }}
+  生成式 LLM   http://<WSL-IP>:{{ .Values.gen.service.nodePort }}   （{{ .Values.gen.servedModelName }}，/v1/chat/completions）
+  指标         http://<WSL-IP>:{{ .Values.gen.service.metricsNodePort }}/metrics
+{{- end }}
+{{- if .Values.embed.enabled }}
+  向量服务     http://<WSL-IP>:{{ .Values.embed.service.nodePort }}   （{{ .Values.embed.servedModelName }}，/v1/embeddings）
+{{- end }}
+{{- if .Values.asr.enabled }}
+  ASR          http://<WSL-IP>:{{ .Values.asr.service.nodePort }}
+{{- end }}
+
+⚠️ Windows 访问 k3s 的 NodePort 必须用 **WSL 的 IP**，不能用 127.0.0.1 ——
+   NodePort 走 iptables DNAT，不产生 listen socket，WSL2 的 localhostForwarding 看不到。
+   取 IP：wsl -d Ubuntu-24.04 -- hostname -I
+
+── 显存预算 ─────────────────────────────────────────────────────────
+  gen   gpu-memory-utilization = {{ .Values.gen.gpuMemoryUtilization }}
+  embed gpu-memory-utilization = {{ .Values.embed.gpuMemoryUtilization }}
+  合计 = {{ add .Values.gen.gpuMemoryUtilization .Values.embed.gpuMemoryUtilization }}
+  ⚠️ 必须 < 1.0，改大前先看 nvidia-smi 余量。
+
+── 常用命令 ─────────────────────────────────────────────────────────
+  # 看渲染结果（不落地）
+  helm template {{ .Release.Name }} ./charts/vllm-stack
+
+  # 与集群实际状态比对（部署前必做）
+  helm diff upgrade {{ .Release.Name }} ./charts/vllm-stack
+
+  # 改配置
+  helm upgrade {{ .Release.Name }} ./charts/vllm-stack -f values-prod.yaml
+
+  # 回滚
+  helm rollback {{ .Release.Name }}
+
+  # 卸载（⚠️ PV 是 Retain，模型权重不会被删）
+  helm uninstall {{ .Release.Name }}
+
+── 换模型 ───────────────────────────────────────────────────────────
+  1. 改 values 里的 gen.model / embed.model
+  2. helm upgrade
+  3. Deployment 的 checksum/model annotation 变了 → 自动滚动重建
+  ⚠️ 换向量模型必须重新生成参考向量并重跑 verify-embed.py

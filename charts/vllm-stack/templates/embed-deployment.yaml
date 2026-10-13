@@ -1,0 +1,111 @@
+{{- if .Values.embed.enabled }}
+{{- $ns := include "vllm-stack.namespace" . }}
+# ══════════════════════════════════════════════════════════════════════
+#  向量服务 —— {{ .Values.embed.name }}
+#  等价于 k8s/live/40-vllm-embed.yaml
+#
+#  ⭐ 三个旋钮配错任何一个都照样返回形状正确的向量，但语义是错的：
+#     runner=pooling（否则当生成模型加载，起不来）
+#     pooler use_activation=false（默认 True 会把向量 L2 归一化）
+#     dtype=float32（bf16 有数值漂移）
+# ══════════════════════════════════════════════════════════════════════
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.embed.name }}
+  namespace: {{ $ns }}
+  labels:
+    app: {{ .Values.embed.name }}
+    {{- include "vllm-stack.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.embed.replicas }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: {{ .Values.embed.name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.embed.name }}
+      annotations:
+        checksum/model: {{ .Values.embed.model | sha256sum }}
+    spec:
+      securityContext:
+        fsGroup: 1000
+      containers:
+        - name: vllm
+          image: {{ include "vllm-stack.vllmImage" . }}
+          imagePullPolicy: {{ .Values.global.image.pullPolicy }}
+          command: ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+          args:
+            - "--model={{ .Values.embed.model }}"
+            - "--served-model-name={{ .Values.embed.servedModelName }}"
+            - "--runner={{ .Values.embed.runner }}"
+            - "--host=0.0.0.0"
+            - "--port=8000"
+            - "--max-model-len={{ .Values.embed.maxModelLen }}"
+            - "--dtype={{ .Values.embed.dtype }}"
+            - "--pooler-config={\"use_activation\":{{ .Values.embed.poolerUseActivation }}}"
+            - "--log-config-file=/logcfg/uvicorn.json"
+            - "--gpu-memory-utilization={{ .Values.embed.gpuMemoryUtilization }}"
+          ports:
+            - name: vllm
+              containerPort: 8000
+          env:
+            {{- include "vllm-stack.commonEnv" . | nindent 12 }}
+          volumeMounts:
+            - name: models
+              mountPath: /models
+              readOnly: true
+            - name: hfcache
+              mountPath: /root/.cache
+            - name: uvicorn-logcfg
+              mountPath: /logcfg
+              readOnly: true
+          resources:
+            {{- toYaml .Values.embed.resources | nindent 12 }}
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: {{ .Values.embed.probes.startup.initialDelaySeconds }}
+            periodSeconds: {{ .Values.embed.probes.startup.periodSeconds }}
+            failureThreshold: {{ .Values.embed.probes.startup.failureThreshold }}
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: {{ .Values.embed.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.embed.probes.readiness.timeoutSeconds }}
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: {{ .Values.storage.claimName }}
+            readOnly: true
+        - name: hfcache
+          emptyDir: {}
+        - name: uvicorn-logcfg
+          configMap:
+            name: vllm-uvicorn-logcfg
+      terminationGracePeriodSeconds: 30
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.embed.name }}
+  namespace: {{ $ns }}
+  labels:
+    app: {{ .Values.embed.name }}
+    {{- include "vllm-stack.labels" . | nindent 4 }}
+spec:
+  type: {{ .Values.embed.service.type }}
+  selector:
+    app: {{ .Values.embed.name }}
+  ports:
+    - name: vllm-direct
+      port: {{ .Values.embed.service.port }}
+      targetPort: 8000
+      nodePort: {{ .Values.embed.service.nodePort }}
+      protocol: TCP
+{{- end }}

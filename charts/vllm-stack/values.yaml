@@ -1,0 +1,199 @@
+# ══════════════════════════════════════════════════════════════════════
+#  vllm-stack / values.yaml —— 默认值（面向单卡 8GB 开发环境）
+#
+#  这是 k8s/live/ 那 8 个清单参数化后的等价物。改这里 = 改集群状态，
+#  但改完要 `helm upgrade`（而不是 `kubectl apply`）。
+#
+#  ⚠️ GPU 显存预算：gen + embed + asr 的 gpuMemoryUtilization 之和
+#     必须 < 1.0。当前 0.55 + 0.15 + 0 = 0.70，留 30% 余量。
+# ══════════════════════════════════════════════════════════════════════
+
+global:
+  # 部署到哪个 namespace（留空则用 release 的 namespace）
+  namespace: default
+  image:
+    repository: dsh/vllm-openai-patched
+    tag: "1.1"
+    pullPolicy: IfNotPresent
+
+# ── 模型存储（PV / PVC / StorageClass）────────────────────────────────
+storage:
+  enabled: true
+  createStorageClass: true
+  storageClassName: local-models
+  # 宿主机上放模型权重的目录（WSL2 里就是这个路径）
+  hostPath: /home/user/npc-models
+  claimName: models-pvc
+  size: 50Gi
+  accessModes:
+    - ReadOnlyMany
+  # 保留策略：删除 release 时不删 PV（模型权重复用）
+  reclaimPolicy: Retain
+
+# ── 生成式 LLM（vllm-march7）──────────────────────────────────────────
+gen:
+  enabled: true
+  name: vllm-march7
+  replicas: 1
+  # ⭐ 换模型 = 改这一行
+  model: /models/Qwen3.5-2B-March7-cn
+  servedModelName: march7v3
+  # ⭐ 显存占比（与 embed/asr 之和必须 < 1.0）
+  gpuMemoryUtilization: 0.55
+  # KV cache 固定 1GiB（比按比例分配更可预测）
+  kvCacheMemory: 1073741824
+  maxModelLen: 2048
+  maxNumSeqs: 64
+  trustRemoteCode: true
+  enableLogRequests: true
+  enableLogOutputs: true
+  # 引用 chart 内的 generation-config（templates/configmap-gencfg.yaml）
+  generationConfigMount: /gencfg
+  service:
+    type: NodePort
+    port: 8000
+    nodePort: 30800
+    # 指标端口单独暴露（Prometheus 抓这个）
+    metricsPort: 8001
+    metricsNodePort: 30801
+  resources:
+    requests:
+      cpu: "1"
+      memory: 2Gi
+      nvidia.com/gpu: "1"
+    limits:
+      cpu: "4"
+      memory: 6Gi
+      nvidia.com/gpu: "1"
+  probes:
+    startup:
+      initialDelaySeconds: 20
+      periodSeconds: 5
+      failureThreshold: 90
+    readiness:
+      periodSeconds: 10
+      timeoutSeconds: 5
+
+# ── 向量服务（vllm-embed）─────────────────────────────────────────────
+embed:
+  enabled: true
+  name: vllm-embed
+  replicas: 1
+  model: /models/dmeta-embedding-zh-small
+  servedModelName: dmeta-small
+  # ⭐ 没有 runner=pooling 会被当生成模型加载，起不来
+  runner: pooling
+  gpuMemoryUtilization: 0.15
+  maxModelLen: 512
+  # 与参考向量同精度（模型 config 是 float32）
+  dtype: float32
+  # ⭐ 关掉池化的 L2 归一化（默认 True，与读出头训练分布不符）
+  poolerUseActivation: false
+  service:
+    type: NodePort
+    port: 8000
+    nodePort: 30802
+  resources:
+    requests:
+      cpu: "1"
+      memory: 2Gi
+      nvidia.com/gpu: "1"
+    limits:
+      cpu: "3"
+      memory: 4Gi
+      nvidia.com/gpu: "1"
+  probes:
+    startup:
+      initialDelaySeconds: 10
+      periodSeconds: 5
+      failureThreshold: 60
+    readiness:
+      periodSeconds: 10
+      timeoutSeconds: 5
+
+# ── ASR（llama.cpp server）─────────────────────────────────────────────
+asr:
+  enabled: true
+  name: llama-asr
+  replicas: 1
+  image:
+    repository: ghcr.nju.edu.cn/ggml-org/llama.cpp
+    tag: server
+  model: /models/whisper-ggml/ggml-model.bin
+  mmproj: /models/whisper-ggml/mmproj-model.bin
+  noWebui: true
+  # llama.cpp 走 CPU（不占 GPU 显存）
+  service:
+    type: NodePort
+    port: 8000
+    nodePort: 30803
+  resources:
+    requests:
+      cpu: "1"
+      memory: 1Gi
+    limits:
+      cpu: "4"
+      memory: 4Gi
+
+# ── NVIDIA device plugin（让 nvidia.com/gpu 可调度）──────────────────
+devicePlugin:
+  enabled: true
+  image:
+    repository: nvcr.io/nvidia/k8s-device-plugin
+    tag: v0.17.0
+  # WSL2 适配：timeSlicing 让单卡 advertise 成多份
+  timeSlicingReplicas: 4
+  # ⚠️ WSL2 必须关掉 init error 检查（见 docs）
+  failOnInitError: false
+  migStrategy: none
+
+# ── 可观测性 ──────────────────────────────────────────────────────────
+observability:
+  # 注入到各 Deployment 的 env（原 10 号文件里的 vllm-observability-env）
+  enabled: true
+  prometheus:
+    enabled: true
+    namespace: monitoring
+    scrapeInterval: 15s
+  grafana:
+    enabled: true
+    namespace: monitoring
+  logLevel: INFO
+
+# ── 日志 dictConfig（原 30 号文件）────────────────────────────────────
+logging:
+  uvicornLogConfig: true
+
+# ── 配置文件内容（原 20 / 30 号文件的 ConfigMap 正文）────────────────
+# 这两个是「内容」而非「结构」，所以整段放 values 里；生产环境建议用
+# `--set-file config.gencfgBody=./gencfg.json` 从文件注入，避免 values 膨胀。
+config:
+  # generation-config：服务端默认采样参数（含 logit_bias 屏蔽非中文 token）
+  gencfgBody: |
+    {
+      "temperature": 0.7,
+      "top_p": 0.9,
+      "max_tokens": 512
+    }
+  # uvicorn / vLLM 的日志 dictConfig
+  uvicornLogConfigBody: |
+    {
+      "version": 1,
+      "disable_existing_loggers": false,
+      "formatters": {
+        "default": {
+          "format": "%(asctime)s %(levelname)s %(name)s %(message)s"
+        }
+      },
+      "handlers": {
+        "console": {
+          "class": "logging.StreamHandler",
+          "formatter": "default",
+          "stream": "ext://sys.stdout"
+        }
+      },
+      "root": {
+        "level": "INFO",
+        "handlers": ["console"]
+      }
+    }

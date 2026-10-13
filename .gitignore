@@ -71,3 +71,23 @@ wsl-ip.txt
 *.safetensors
 *.gguf
 output_banned_ids.pt
+
+# ── Terraform / OpenTofu ──
+# ⚠️ .terraform/ 是 provider 二进制缓存（本机实测 128 MB），绝不能进仓库。
+#    但 .terraform.lock.hcl 【故意不忽略】—— 它锁定 provider 版本与签名，
+#    是保证「别人 clone 下来能装到同一版本」的证据，属于仓库的一部分。
+.terraform/
+terraform.tfstate
+terraform.tfstate.backup
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+# 敏感变量文件（真值不进仓库；*.tfvars.example 是模板，可以进）
+*.tfvars
+!*.tfvars.example
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+

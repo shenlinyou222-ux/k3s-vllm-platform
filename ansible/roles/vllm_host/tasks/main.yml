@@ -1,0 +1,120 @@
+---
+# ══════════════════════════════════════════════════════════════════════
+#  role: vllm_host —— 模型仓与运行前提
+#
+#  这个 role 处理的是「k8s 看不到的那一层」：
+#    · 宿主机上的模型权重目录（PV 的 hostPath 指向它）
+#    · 目录属主（Pod 里 fsGroup=1000，权限不对会 mount 失败）
+#    · 权重指纹清单（models.lock）的校验
+# ══════════════════════════════════════════════════════════════════════
+
+- name: 确保模型目录存在
+  ansible.builtin.file:
+    path: "{{ models_host_path }}"
+    state: directory
+    owner: "{{ models_owner }}"
+    group: "{{ models_group }}"
+    mode: "0755"
+
+- name: 统计模型目录内容
+  ansible.builtin.shell: |
+    set -o pipefail
+    find {{ models_host_path }} -maxdepth 2 -type d | wc -l
+  register: model_dirs
+  changed_when: false
+
+- name: 记录模型文件数
+  ansible.builtin.set_fact:
+    model_file_count: "{{ model_dirs.stdout | trim }} 个子目录"
+
+- name: 列出模型目录（用于确认 PV 里到底有什么）
+  ansible.builtin.command: ls -la {{ models_host_path }}
+  register: models_ls
+  changed_when: false
+  failed_when: false
+
+- name: 模型目录内容
+  ansible.builtin.debug:
+    msg: "{{ models_ls.stdout_lines | default(['(空或不可读)']) }}"
+
+# ── 权重指纹校验（可选，慢）──────────────────────────────────────────
+# 为什么需要：`kubectl diff` 只看 YAML 文本，看不出「挂载路径背后
+# 的权重文件被换了」。原流水线的 check-models.py 就是补这个盲区。
+- name: 校验模型权重指纹
+  ansible.builtin.command:
+    cmd: python3 scripts/ci/check-models.py --verify
+    chdir: "{{ repo_root }}"
+  register: checksum_result
+  changed_when: false
+  failed_when: false
+  when: models_verify_checksums
+
+- name: 指纹校验结果
+  ansible.builtin.debug:
+    msg: "{{ checksum_result.stdout_lines | default(['(未启用校验)']) }}"
+  when: models_verify_checksums
+
+# ── NodePort 冲突预检 ────────────────────────────────────────────────
+# 三个服务要占 30800/30802/30803。装之前先确认没被占，
+# 否则 helm install 会失败在「nodePort already allocated」。
+- name: 读取要用的 NodePort（与 chart values 对齐）
+  ansible.builtin.set_fact:
+    required_nodeports: [30800, 30801, 30802, 30803]
+
+- name: 检查这些端口在宿主机上是否已被监听
+  ansible.builtin.shell: |
+    set -o pipefail
+    for p in {{ required_nodeports | join(' ') }}; do
+      if ss -ltn "sport = :$p" 2>/dev/null | grep -q LISTEN; then
+        echo "OCCUPIED $p"
+      fi
+    done
+    true
+  register: port_check
+  changed_when: false
+  failed_when: false
+
+- name: 端口占用情况
+  ansible.builtin.debug:
+    msg: >-
+      {{ (port_check.stdout | trim) == ''
+         | ternary('✅ ' ~ (required_nodeports | join('/')) ~ ' 都空闲',
+                   '⚠️ 已被占用: ' ~ (port_check.stdout | trim)) }}
+
+# ── Helm ─────────────────────────────────────────────────────────────
+- name: 检查 helm 是否可用
+  ansible.builtin.stat:
+    path: "{{ helm_install_dir }}/helm"
+  register: helm_bin
+
+- name: 下载 helm
+  ansible.builtin.get_url:
+    url: "https://get.helm.sh/helm-{{ helm_version }}-linux-amd64.tar.gz"
+    dest: /tmp/helm.tgz
+    mode: "0644"
+  when: not helm_bin.stat.exists
+
+- name: 解压 helm
+  ansible.builtin.unarchive:
+    src: /tmp/helm.tgz
+    dest: /tmp
+    remote_src: true
+  when: not helm_bin.stat.exists
+
+- name: 安装 helm 到用户目录
+  ansible.builtin.copy:
+    src: /tmp/linux-amd64/helm
+    dest: "{{ helm_install_dir }}/helm"
+    remote_src: true
+    mode: "0755"
+  when: not helm_bin.stat.exists
+
+- name: helm 版本
+  ansible.builtin.command: "{{ helm_install_dir }}/helm version --short"
+  register: helm_ver
+  changed_when: false
+  failed_when: false
+
+- name: 报告
+  ansible.builtin.debug:
+    msg: "helm: {{ helm_ver.stdout | default('不可用') }}"

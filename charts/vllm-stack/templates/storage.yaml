@@ -1,0 +1,53 @@
+{{- if .Values.storage.enabled }}
+{{- $ns := include "vllm-stack.namespace" . }}
+{{- if .Values.storage.createStorageClass }}
+# ── StorageClass ──────────────────────────────────────────────────────
+# local-path 是 k3s 自带的；这里单独建一个带 Retain 的，避免删 release 时
+# 连带把模型权重（几十 GB）删掉。
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ .Values.storage.storageClassName }}
+  labels:
+    {{- include "vllm-stack.labels" . | nindent 4 }}
+provisioner: rancher.io/local-path
+reclaimPolicy: {{ .Values.storage.reclaimPolicy }}
+volumeBindingMode: WaitForFirstConsumer
+---
+{{- end }}
+# ── PersistentVolume ─────────────────────────────────────────────────
+# 直接绑宿主机上的模型目录。宿主机目录由 Ansible 的 vllm_host role 创建/校验。
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: {{ .Values.storage.claimName | replace "pvc" "pv" }}
+  labels:
+    {{- include "vllm-stack.labels" . | nindent 4 }}
+spec:
+  capacity:
+    storage: {{ .Values.storage.size }}
+  accessModes:
+    {{- toYaml .Values.storage.accessModes | nindent 4 }}
+  persistentVolumeReclaimPolicy: {{ .Values.storage.reclaimPolicy }}
+  storageClassName: {{ .Values.storage.storageClassName }}
+  hostPath:
+    path: {{ .Values.storage.hostPath }}
+    type: Directory
+---
+# ── PersistentVolumeClaim ────────────────────────────────────────────
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ .Values.storage.claimName }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "vllm-stack.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    {{- toYaml .Values.storage.accessModes | nindent 4 }}
+  storageClassName: {{ .Values.storage.storageClassName }}
+  resources:
+    requests:
+      storage: {{ .Values.storage.size }}
+  volumeName: {{ .Values.storage.claimName | replace "pvc" "pv" }}
+{{- end }}
