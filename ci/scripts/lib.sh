@@ -65,6 +65,7 @@ MODELS_LOCK="${CI_MODELS_LOCK:-$LIVE_DIR/models.lock}"
 #  ⚠️ 两个服务用同一个 label 规则（app = Deployment 名），
 #     所以下面所有 `-l app=...` 一律写 "$POD_SELECTOR"，不再写死。
 TARGET="${CI_TARGET:-march7}"
+NS=default
 case "$TARGET" in
   march7)
     DEPLOY=vllm-march7
@@ -90,12 +91,20 @@ case "$TARGET" in
     BENCH_UNIT="tok/s"
     BENCH_MIN_DEFAULT=50
     ;;
+  jm)
+    NS=jm
+    DEPLOY=jm-downloader
+    CONTAINER=jm-downloader
+    VERIFY_PY=verify-jm.py
+    BENCH_PY=bench-jm.py
+    BENCH_UNIT="req/s"
+    BENCH_MIN_DEFAULT=0
+    ;;
   *)
-    printf '未知 CI_TARGET=%s（可选 march7|embed|npc）\n' "$TARGET" >&2
+    printf '未知 CI_TARGET=%s（可选 march7|embed|npc|jm）\n' "$TARGET" >&2
     exit 1
     ;;
 esac
-NS=default
 POD_SELECTOR="app=$DEPLOY"
 
 # ── 颜色 ──

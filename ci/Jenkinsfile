@@ -62,8 +62,8 @@ pipeline {
         //    ⚠️ 自动触发（pollSCM）时没有参数 → params.TARGET 为 null
         //       → CI_TARGET 为空 → lib.sh 里 ${CI_TARGET:-march7} 兜底成 march7
         //       ⇒ 自动构建的默认行为与以前完全一致（管 vllm-march7）
-        choice(name: 'TARGET', choices: ['march7', 'embed', 'npc'],
-               description: 'march7=生成式 LLM(vllm-march7) / embed=向量服务(vllm-embed) / npc=剧情掩码(vllm-mask)')
+        choice(name: 'TARGET', choices: ['march7', 'embed', 'npc', 'jm'],
+               description: 'march7=生成式 LLM / embed=向量服务 / npc=剧情掩码(vllm-mask) / jm=jm-downloader+komga')
         choice(name: 'MODE', choices: ['full', 'restart-only', 'dry'],
                description: 'full=完整发布 / restart-only=只重启(ConfigMap改动) / dry=只预检')
         booleanParam(name: 'SKIP_VERIFY', defaultValue: false,
