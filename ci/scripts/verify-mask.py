@@ -64,11 +64,20 @@ def main():
         "max_tokens": 48,
         "chat_template_kwargs": {"enable_thinking": False},
     }
-    try:
-        d = post("/v1/chat/completions", body)
-        text = d["choices"][0]["message"]["content"] or ""
-    except Exception as e:
-        fail("chat 请求失败: %r" % (e,))
+    # vLLM 刚 rollout 完时模型可能还在加载，重试到 120s
+    import time
+    text, last = "", None
+    for attempt in range(12):
+        try:
+            d = post("/v1/chat/completions", body, timeout=30)
+            text = d["choices"][0]["message"]["content"] or ""
+            if text.strip():
+                break
+        except Exception as e:
+            last = e
+        time.sleep(10)
+    if not text.strip():
+        fail("chat 请求失败: %r" % (last,))
 
     if not text.strip():
         fail("返回为空")
