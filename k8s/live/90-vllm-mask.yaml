@@ -23,12 +23,7 @@ spec:
     spec:
       containers:
       - args:
-        - "patch -p1 -d /usr/local/lib/python3.12/dist-packages < /patch/npc_ctx_mask.patch\n\
-          exec python3 -m vllm.entrypoints.openai.api_server \\\n  --model /model17\
-          \ \\\n  --served-model-name q17b-flex \\\n  --host 0.0.0.0 --port 8000 \\\
-          \n  --max-model-len 16384 \\\n  --gpu-memory-utilization 0.85 \\\n  --max-num-seqs\
-          \ 1 \\\n  --enforce-eager \\\n  --enable-prefix-caching \\\n  --attention-backend\
-          \ FLEX_ATTENTION \\\n  --trust-remote-code\n"
+        - patch -p1 -d /usr/local/lib/python3.12/dist-packages < /patch/npc_ctx_mask.patch; exec python3 -m vllm.entrypoints.openai.api_server --model /model17 --served-model-name q17b-flex --host 0.0.0.0 --port 8000 --max-model-len 16384 --gpu-memory-utilization 0.85 --max-num-seqs 1 --enforce-eager --enable-prefix-caching --attention-backend FLEX_ATTENTION --trust-remote-code
         command:
         - bash
         - -c
