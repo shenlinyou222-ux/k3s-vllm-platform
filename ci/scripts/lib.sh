@@ -82,8 +82,16 @@ case "$TARGET" in
     BENCH_UNIT="req/s"
     BENCH_MIN_DEFAULT=20
     ;;
+  npc)
+    DEPLOY=vllm-mask
+    CONTAINER=vllm
+    VERIFY_PY=verify-mask.py
+    BENCH_PY=bench.py
+    BENCH_UNIT="tok/s"
+    BENCH_MIN_DEFAULT=50
+    ;;
   *)
-    printf '未知 CI_TARGET=%s（可选 march7|embed）\n' "$TARGET" >&2
+    printf '未知 CI_TARGET=%s（可选 march7|embed|npc）\n' "$TARGET" >&2
     exit 1
     ;;
 esac
@@ -175,6 +183,7 @@ vllm_base_url() {
   local svc_port nodeports
   case "$TARGET" in
     embed) svc_port="http://vllm-embed.default.svc.cluster.local:8000"; nodeports="30802" ;;
+    npc)   svc_port="http://vllm-mask.default.svc.cluster.local:8000"; nodeports="30810" ;;
     *)     svc_port="http://vllm-march7.default.svc.cluster.local:8001"; nodeports="30800 30801" ;;
   esac
   local c ip p
