@@ -1,4 +1,4 @@
-// ══════════════════════════════════════════════════════════════
+﻿// ══════════════════════════════════════════════════════════════
 //  Jenkinsfile —— 声明式流水线
 //
 //  ⭐ 核心设计：Jenkinsfile 不重复实现任何逻辑，只调 scripts/ci/ 下的脚本。
@@ -33,7 +33,7 @@ pipeline {
         // 产物（state / 备份 / diff 日志）落宿主仓库：
         //   agent 的 workspace 是 emptyDir，post.always 的 cleanWs() 会清掉它，
         //   而回滚要用的 state 和备份必须活过这次构建。
-        CI_ARTIFACT_DIR = '/srv/k3s-vllm-platform/logs/ci'
+        CI_ARTIFACT_DIR = '/mnt/e/habitica-setup/k3s-ci-artifacts'
         NS       = 'default'                 // ⭐ vllm-march7 / vllm-embed 都在 default，不是 cicd
         CI_YES   = '1'                       // 无人值守：跳过脚本里的人工确认
         TZ       = 'Asia/Shanghai'
