@@ -34,7 +34,9 @@ metadata:
   namespace: default
   labels: {app: llama-asr}
 spec:
-  replicas: 1
+  replicas: 0
+  # 2026-10-30：演示环境不再需要 ASR，缩容到 0 释放 CPU/内存。
+  # 需要时把 replicas 改回 1，走同一条流水线。
   # 单副本 + Recreate：转写服务是无状态的，重建期间短暂不可用可接受。
   # 用 RollingUpdate 反而会两个 pod 同时把 1.4GB 模型读进内存。
   strategy: {type: Recreate}
