@@ -1,7 +1,7 @@
 ﻿// ══════════════════════════════════════════════════════════════
 //  Jenkinsfile —— 声明式流水线
 //
-//  ⭐ 核心设计：Jenkinsfile 不重复实现任何逻辑，只调 scripts/ci/ 下的脚本。
+//  ⭐ 核心设计：Jenkinsfile 不重复实现任何逻辑，只调 ci/scripts/ 下的脚本。
 //     理由：
 //       · 脚本能手工跑（不依赖 Jenkins），也能被 Jenkins 调 → 单一事实来源
 //       · 本地调试和 CI 行为完全一致
@@ -41,7 +41,7 @@ pipeline {
         // ⭐⭐ 目标选择（2026-10-08 新增）：一个集群里现在有两个 vLLM 服务
         //      march7 → deploy/vllm-march7  生成式 LLM，判据 tok/s
         //      embed  → deploy/vllm-embed   向量服务，  判据 req/s
-        //    这个值只往下传（CI_TARGET），所有 case 判断都在 scripts/ci/lib.sh
+        //    这个值只往下传（CI_TARGET），所有 case 判断都在 ci/scripts/lib.sh
         //    里 —— Jenkinsfile 不重复实现逻辑（本文件开头的设计原则）。
         CI_TARGET = "${params.TARGET}"
 
@@ -106,8 +106,8 @@ pipeline {
                   git -C "$WORKSPACE" log --oneline -1
                   echo "   k8s/live/ 内容:"
                   ls -1 "$WORKSPACE/k8s/live/" | sed 's/^/     /'
-                  echo "── 目标（由 CI_TARGET 决定，profile 在 scripts/ci/lib.sh）──"
-                  eval "$(bash "$WORKSPACE/scripts/ci/target.sh")"
+                  echo "── 目标（由 CI_TARGET 决定，profile 在 ci/scripts/lib.sh）──"
+                  eval "$(bash "$WORKSPACE/ci/scripts/target.sh")"
                   echo "   CI_TARGET=$TARGET  →  deploy/$DEPLOY"
                   echo "   功能验证 $VERIFY_PY   性能门槛 $BENCH_MIN_DEFAULT $BENCH_UNIT"
                   echo "── 集群 ──"
@@ -128,7 +128,7 @@ pipeline {
                     //   执行不到 → 明明该走"无需发布"的正常路径，UI 上却是红叉。
                     //   （实测：构建 #7 就是死在这里，"没有差异"被报成 FAILURE）
                     // ⚠️ 单引号：让 shell 去展开 $WORKSPACE，Groovy 不插值
-                    def rc = sh(script: 'set +e; bash "$WORKSPACE/scripts/ci/precheck.sh"; echo "RC=$?"',
+                    def rc = sh(script: 'set +e; bash "$WORKSPACE/ci/scripts/precheck.sh"; echo "RC=$?"',
                                 returnStdout: true).trim()
                     // ⭐⭐ 必须显式打印这一行：
                     //   returnStdout 会把 precheck 的 stdout【全部捕获走】，
@@ -166,9 +166,9 @@ pipeline {
                     // ⭐ 标记：部署【真正开始过】—— post.failure 靠它决定要不要回滚
                     env.DEPLOY_STARTED = 'true'
                     if (params.MODE == 'restart-only') {
-                        sh 'bash "$WORKSPACE/scripts/ci/restart.sh"'
+                        sh 'bash "$WORKSPACE/ci/scripts/restart.sh"'
                     } else {
-                        sh 'bash "$WORKSPACE/scripts/ci/deploy.sh"'
+                        sh 'bash "$WORKSPACE/ci/scripts/deploy.sh"'
                     }
                 }
             }
@@ -182,14 +182,14 @@ pipeline {
                 //    以前这段内联逻辑只认 vllm-march7 的日志特征
                 //    （Using V2 Model Runner / overridden by /gencfg），
                 //    换成 embedding 服务必然全红。
-                sh 'bash "$WORKSPACE/scripts/ci/verify.sh" --layer=log'
+                sh 'bash "$WORKSPACE/ci/scripts/verify.sh" --layer=log'
             }
         }
 
         stage('⑤ 功能验证') {
             when { expression { return env.NO_DEPLOY != 'true' && params.MODE != 'dry' && !params.SKIP_VERIFY } }
             steps {
-                sh 'bash "$WORKSPACE/scripts/ci/verify.sh" --layer=func'
+                sh 'bash "$WORKSPACE/ci/scripts/verify.sh" --layer=func'
             }
         }
 
@@ -198,14 +198,14 @@ pipeline {
             steps {
                 // 门槛与单位都随 target 走（march7: tok/s ≥ 100；embed: req/s ≥ 20）
                 // BENCH_MIN 为空时 verify.sh 用 target 的默认值兜底
-                sh 'bash "$WORKSPACE/scripts/ci/verify.sh" --layer=bench'
+                sh 'bash "$WORKSPACE/ci/scripts/verify.sh" --layer=bench'
             }
         }
 
         stage('⑦ 记录结果') {
             steps {
                 sh '''
-                  eval "$(bash "$WORKSPACE/scripts/ci/target.sh")"
+                  eval "$(bash "$WORKSPACE/ci/scripts/target.sh")"
                   echo "── 目标工作负载（$DEPLOY）──"
                   kubectl -n "$NS" get pods -l "$POD_SELECTOR" || true
                   echo "── 镜像 ──"
@@ -230,7 +230,7 @@ pipeline {
                 //     —— 实测把正在服务的 vLLM 重启了，纯属自伤
                 if (env.DEPLOY_STARTED == 'true') {
                     echo "❌ 部署阶段之后失败 → 自动回滚"
-                    sh 'bash "$WORKSPACE/scripts/ci/rollback.sh" || echo "回滚也失败 —— 需要人工介入！"'
+                    sh 'bash "$WORKSPACE/ci/scripts/rollback.sh" || echo "回滚也失败 —— 需要人工介入！"'
                 } else {
                     echo "❌ 失败发生在【部署之前】→ 不回滚（线上没被改动）"
                 }
@@ -238,7 +238,7 @@ pipeline {
         }
         always {
             sh '''
-              eval "$(bash "$WORKSPACE/scripts/ci/target.sh")"
+              eval "$(bash "$WORKSPACE/ci/scripts/target.sh")"
               echo "── 目标工作负载状态（$DEPLOY）──"
               kubectl -n "$NS" get pods -l "$POD_SELECTOR" || true
               echo "── 最近日志 ──"
@@ -250,7 +250,7 @@ pipeline {
         //        always → changed/fixed/regression/aborted/failure/success/... → cleanup
         //     也就是说 always 比 failure【先】跑。把 cleanWs() 放在 always 里，
         //     失败时工作区已经被删掉了，failure 里的 rollback.sh 根本找不到：
-        //        + bash .../scripts/ci/rollback.sh
+        //        + bash .../ci/scripts/rollback.sh
         //        bash: .../rollback.sh: No such file or directory
         //        + echo '回滚也失败 —— 需要人工介入！'
         //     实测于 2026-10-08 构建 #24 —— 也就是说「失败自动回滚」这个功能
