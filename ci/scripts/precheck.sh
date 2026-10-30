@@ -62,19 +62,19 @@ cp -a "$LIVE_DIR"/. "$BAK"/
 
 # ⭐ 备份必须可验证（逐文件 md5 一致才算备份成功）
 NF=0
-for f in $(live_files); do
+while IFS= read -r f; do
   b="$BAK/$(basename "$f")"
   M1=$(md5sum "$f" | cut -d' ' -f1)
   M2=$(md5sum "${b}" | cut -d' ' -f1)
   [ "$M1" = "$M2" ] || die "备份校验失败：$(basename "$f")  $M1 != $M2"
   NF=$((NF + 1))
-done
+done < <(live_files)
 [ "$NF" -gt 0 ] || die "$LIVE_DIR 里没有 .yaml（是不是目录搞错了？）"
 ok "备份已校验: $BAK"
 ok "文件数 = $NF"
-for f in $(live_files); do
+while IFS= read -r f; do
   printf '     %s\n' "$(basename "$f")"
-done
+done < <(live_files)
 
 stage "① 预检 —— 服务端校验（dry-run）"
 if ! kubectl apply -f "$LIVE_DIR" --dry-run=server 2>&1 | tee "$LOG_DIR/dryrun-$TS.txt"; then
